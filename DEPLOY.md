@@ -165,7 +165,10 @@ client = AudioEchoClient(server_url="wss://audio-echo-server-xxxxx-uc.a.run.app"
 The deployment uses these settings:
 - **Memory**: 512Mi (adjust if needed)
 - **CPU**: 1 vCPU
-- **Timeout**: 3600 seconds (1 hour) - important for WebSocket connections
+- **Timeout**: 3600 seconds (1 hour) - **Maximum allowed by Cloud Run**
+  - This is the hard limit for connection duration (Cloud Run platform constraint)
+  - The server automatically sends keep-alive pings every 30 seconds to prevent idle disconnects
+  - For sessions longer than 1 hour, implement client-side reconnection logic
 - **Max Instances**: 10 (adjust based on your needs)
 - **Port**: 8080 (Cloud Run standard)
 
@@ -222,7 +225,10 @@ The free tier includes:
 
 Cloud Run supports WebSocket, but ensure:
 1. You're using `wss://` (not `ws://`) for HTTPS URLs
-2. The timeout is set high enough (3600 seconds)
+2. The timeout is set to the maximum (3600 seconds = 1 hour)
+   - **Note**: Cloud Run has a hard limit of 3600 seconds per connection
+   - The server includes keep-alive pings every 30 seconds to prevent idle timeouts
+   - For longer sessions, implement reconnection logic in the client
 3. The client properly handles reconnections
 
 ### Architecture Mismatch Error

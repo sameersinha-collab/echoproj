@@ -25,7 +25,7 @@ DEFAULT_FORMAT = pyaudio.paInt16
 class AudioEchoClient:
     """WebSocket client for audio streaming with echo playback."""
     
-    def __init__(self, server_url: str = "ws://localhost:8765", api_key: str = None):
+    def __init__(self, server_url: str = "wss://audio-echo-server-388996421538.asia-south1.run.app", api_key: str = "Oe3yxB9OatobNswqGpDizsiSuzESDgKt"):
         self.server_url = server_url
         self.api_key = api_key or os.getenv("API_KEY")  # API key for token authentication
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None
@@ -218,6 +218,11 @@ class AudioEchoClient:
     async def connect(self):
         """Connect to WebSocket server."""
         try:
+
+            # Validate URL format
+            if not (self.server_url.startswith("ws://") or self.server_url.startswith("wss://")):
+                raise ValueError(f"Invalid WebSocket URL format: {self.server_url}. Must start with ws:// or wss://")
+            
             print(f"Connecting to {self.server_url}...")
             
             # Priority: 1) API key, 2) gcloud identity token, 3) no auth
@@ -243,10 +248,23 @@ class AudioEchoClient:
             if headers:
                 connect_kwargs['additional_headers'] = list(headers.items())
             
-            self.websocket = await websockets.connect(connection_url, **connect_kwargs)
-            self.is_connected = True
-            self.loop = asyncio.get_running_loop()
-            print("Connected to server!")
+            try:
+                self.websocket = await websockets.connect(connection_url, **connect_kwargs)
+                self.is_connected = True
+                self.loop = asyncio.get_running_loop()
+                print("Connected to server!")
+            except websockets.exceptions.InvalidStatusCode as e:
+                print(f"Connection failed with status {e.status_code}: {e}")
+                if e.status_code == 403:
+                    print("\nPossible causes:")
+                    print("  - Service requires authentication but token is invalid")
+                    print("  - Organization policy blocking access")
+                    print("  - Try using API key authentication instead")
+                elif e.status_code == 404:
+                    print("\nPossible causes:")
+                    print("  - Server URL is incorrect")
+                    print("  - Service is not deployed or not running")
+                raise
             
             # Start playback thread
             self.playback_thread = threading.Thread(target=self.playback_worker, daemon=True)
@@ -274,10 +292,21 @@ class AudioEchoClient:
                     except json.JSONDecodeError:
                         pass
             
-        except websockets.exceptions.ConnectionClosed:
-            print("Connection closed by server")
+        except websockets.exceptions.ConnectionClosed as e:
+            print(f"Connection closed by server: {e}")
+        except websockets.exceptions.InvalidStatusCode as e:
+            print(f"HTTP error {e.status_code}: {e}")
+            if e.status_code == 403:
+                print("\nAuthentication failed. Try:")
+                print("  1. Set API_KEY environment variable: export API_KEY=your-key")
+                print("  2. Or ensure gcloud is authenticated: gcloud auth login")
+        except websockets.exceptions.InvalidURI as e:
+            print(f"Invalid server URL: {e}")
+            print(f"  Current URL: {self.server_url}")
         except Exception as e:
-            print(f"Connection error: {e}")
+            print(f"Connection error: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             self.is_connected = False
             self.stop_recording()
@@ -318,8 +347,23 @@ async def main():
     """Main entry point."""
     # Get API key from environment or use None (will try gcloud token as fallback)
     api_key = os.getenv("API_KEY")
+    
+    # Warn if API key is not set
+    if not api_key:
+        print("⚠️  WARNING: API_KEY environment variable not set!")
+        print("   Set it with: export API_KEY=your-api-key-here")
+        print("   Or pass it: API_KEY=your-key python client.py")
+        print("   Attempting connection without API key (may fail if server requires auth)...\n")
+    
     # Get server URL from environment or use default
-    server_url = os.getenv("SERVER_URL", "ws://localhost:8765")
+    server_url = os.getenv("SERVER_URL", "wss://audio-echo-server-388996421538.asia-south1.run.app")
+    
+    if not server_url.startswith(("ws://", "wss://")):
+        print(f"⚠️  ERROR: Invalid server URL: {server_url}")
+        print("   Server URL must start with ws:// or wss://")
+        print("   Set it with: export SERVER_URL=wss://your-server-url")
+        return
+    
     client = AudioEchoClient(
         server_url=server_url,
         api_key=api_key

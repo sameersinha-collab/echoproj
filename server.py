@@ -119,6 +119,9 @@ class AudioEchoServer:
             # Start task to send delayed audio chunks
             send_task = asyncio.create_task(self.send_delayed_audio(websocket))
             
+            # Start keep-alive task to prevent timeout (sends ping every 30 seconds)
+            keep_alive_task = asyncio.create_task(self.keep_alive(websocket))
+            
             # Receive audio chunks from client
             async for message in websocket:
                 if isinstance(message, bytes):
@@ -142,8 +145,13 @@ class AudioEchoServer:
             if websocket in self.clients:
                 del self.clients[websocket]
             send_task.cancel()
+            keep_alive_task.cancel()
             try:
                 await send_task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await keep_alive_task
             except asyncio.CancelledError:
                 pass
     
@@ -162,6 +170,19 @@ class AudioEchoServer:
                 
                 # Small sleep to avoid busy waiting
                 await asyncio.sleep(0.01)  # 10ms
+        except asyncio.CancelledError:
+            pass
+    
+    async def keep_alive(self, websocket):
+        """Send periodic ping to keep connection alive and prevent timeout."""
+        try:
+            while websocket in self.clients:
+                await asyncio.sleep(30)  # Send ping every 30 seconds
+                if websocket in self.clients:
+                    try:
+                        await websocket.ping()
+                    except (websockets.exceptions.ConnectionClosed, Exception):
+                        return
         except asyncio.CancelledError:
             pass
     

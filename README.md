@@ -155,6 +155,16 @@ See [DEPLOY.md](DEPLOY.md) for detailed authentication options.
 - Check firewall settings if using remote connections
 - Verify the server URL matches in both files
 - For Cloud Run: Use `wss://` (not `ws://`) for HTTPS URLs
+- **API Key Required**: Set `API_KEY` environment variable:
+  ```bash
+  export API_KEY=your-api-key-here
+  python client.py
+  ```
+- **Server URL**: Set `SERVER_URL` environment variable if different from default:
+  ```bash
+  export SERVER_URL=wss://your-server-url
+  ```
+- See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed troubleshooting steps
 
 ### Audio quality issues
 - Ensure your microphone supports 16kHz sample rate
