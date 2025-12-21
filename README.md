@@ -115,9 +115,10 @@ The system uses standard ASR audio settings:
 The server can be deployed to Google Cloud Run for cloud hosting. See [DEPLOY.md](DEPLOY.md) for detailed instructions.
 
 **Configuration:**
-- **Project**: `handy-compass-481307-i8`
-- **Artifact Registry**: `asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy`
-- **Region**: `asia-south1`
+- Update `cloudbuild.yaml` and `deploy.sh` with your:
+  - **Project ID**: Your Google Cloud project ID
+  - **Artifact Registry**: `YOUR_REGION-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY`
+  - **Region**: Your preferred region (e.g., `us-central1`, `asia-south1`)
 
 **Quick deploy:**
 ```bash

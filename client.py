@@ -25,7 +25,7 @@ DEFAULT_FORMAT = pyaudio.paInt16
 class AudioEchoClient:
     """WebSocket client for audio streaming with echo playback."""
     
-    def __init__(self, server_url: str = "wss://audio-echo-server-388996421538.asia-south1.run.app", api_key: str = "Oe3yxB9OatobNswqGpDizsiSuzESDgKt"):
+    def __init__(self, server_url: str = "ws://localhost:8765", api_key: str = None):
         self.server_url = server_url
         self.api_key = api_key or os.getenv("API_KEY")  # API key for token authentication
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None
@@ -318,8 +318,10 @@ async def main():
     """Main entry point."""
     # Get API key from environment or use None (will try gcloud token as fallback)
     api_key = os.getenv("API_KEY")
+    # Get server URL from environment or use default
+    server_url = os.getenv("SERVER_URL", "ws://localhost:8765")
     client = AudioEchoClient(
-        server_url="wss://audio-echo-server-388996421538.asia-south1.run.app",
+        server_url=server_url,
         api_key=api_key
     )
     

@@ -12,9 +12,10 @@ NC='\033[0m' # No Color
 echo -e "${GREEN}Deploying Audio Echo Server to Google Cloud Run...${NC}"
 
 # Set project and registry details
-PROJECT_ID="handy-compass-481307-i8"
-REGISTRY_PATH="asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy"
-REGION="asia-south1"
+# Update these with your actual values
+PROJECT_ID="${PROJECT_ID:-YOUR_PROJECT_ID}"
+REGISTRY_PATH="${REGISTRY_PATH:-YOUR_REGION-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY}"
+REGION="${REGION:-YOUR_REGION}"
 IMAGE_NAME="audio-echo-server"
 FULL_IMAGE_PATH="${REGISTRY_PATH}/${IMAGE_NAME}"
 
@@ -44,7 +45,9 @@ gcloud services enable artifactregistry.googleapis.com --quiet
 
 # Configure Docker authentication for Artifact Registry
 echo -e "${GREEN}Configuring Docker authentication...${NC}"
-gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
+# Extract region from registry path (format: REGION-docker.pkg.dev/...)
+REGISTRY_HOST=$(echo "$REGISTRY_PATH" | cut -d'/' -f1)
+gcloud auth configure-docker "$REGISTRY_HOST" --quiet
 
 # Submit build
 echo -e "${GREEN}Building and deploying...${NC}"

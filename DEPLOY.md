@@ -16,8 +16,8 @@ This guide will help you deploy the WebSocket audio echo server to Google Cloud 
 # Login to Google Cloud
 gcloud auth login
 
-# Set your project
-gcloud config set project handy-compass-481307-i8
+# Set your project (replace with your actual project ID)
+gcloud config set project YOUR_PROJECT_ID
 
 # Enable required APIs
 gcloud services enable cloudbuild.googleapis.com
@@ -25,7 +25,7 @@ gcloud services enable run.googleapis.com
 gcloud services enable artifactregistry.googleapis.com
 ```
 
-**Note**: This project uses Artifact Registry at `asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy`
+**Note**: Update the Artifact Registry path in `cloudbuild.yaml` and `deploy.sh` with your actual registry path: `YOUR_REGION-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY`
 
 ### 2. Build and Deploy Using Cloud Build (Recommended)
 
@@ -38,8 +38,8 @@ gcloud builds submit --config cloudbuild.yaml
 
 This will:
 - Build the Docker image
-- Push it to Artifact Registry (`asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy`)
-- Deploy it to Cloud Run in `asia-south1` region
+- Push it to Artifact Registry (configured in `cloudbuild.yaml`)
+- Deploy it to Cloud Run in your specified region
 
 ### 3. Manual Deployment (Alternative)
 
@@ -47,19 +47,21 @@ If you prefer to deploy manually:
 
 ```bash
 # Configure Docker to use gcloud as a credential helper
-gcloud auth configure-docker asia-south1-docker.pkg.dev
+# Replace YOUR_REGION with your actual region (e.g., asia-south1, us-central1)
+gcloud auth configure-docker YOUR_REGION-docker.pkg.dev
 
 # Build the Docker image for linux/amd64 (required for Cloud Run)
 # Note: If building on Apple Silicon (M1/M2), you MUST use --platform linux/amd64
-docker build --platform linux/amd64 -t asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy/audio-echo-server .
+# Replace with your actual registry path
+docker build --platform linux/amd64 -t YOUR_REGION-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY/audio-echo-server .
 
 # Push to Artifact Registry
-docker push asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy/audio-echo-server
+docker push YOUR_REGION-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY/audio-echo-server
 
 # Deploy to Cloud Run
 gcloud run deploy audio-echo-server \
-  --image asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy/audio-echo-server \
-  --region asia-south1 \
+  --image YOUR_REGION-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY/audio-echo-server \
+  --region YOUR_REGION \
   --platform managed \
   --allow-unauthenticated \
   --port 8080 \
@@ -70,7 +72,7 @@ gcloud run deploy audio-echo-server \
 
 # Optionally set API key for token-based authentication
 # gcloud run services update audio-echo-server \
-#   --region=asia-south1 \
+#   --region=YOUR_REGION \
 #   --set-env-vars="API_KEY=your-api-key-here"
 ```
 
@@ -79,7 +81,8 @@ gcloud run deploy audio-echo-server \
 After deployment, get your server URL:
 
 ```bash
-gcloud run services describe audio-echo-server --region asia-south1 --format 'value(status.url)'
+# Replace YOUR_REGION with your actual region
+gcloud run services describe audio-echo-server --region YOUR_REGION --format 'value(status.url)'
 ```
 
 The URL will look like: `https://audio-echo-server-xxxxx-uc.a.run.app`
@@ -99,8 +102,9 @@ This is the simplest method that works for all users, even without gcloud CLI:
 
 2. **Set the API key as an environment variable on Cloud Run:**
    ```bash
+   # Replace YOUR_REGION with your actual region
    gcloud run services update audio-echo-server \
-     --region=asia-south1 \
+     --region=YOUR_REGION \
      --set-env-vars="API_KEY=your-generated-api-key-here"
    ```
 
@@ -124,8 +128,8 @@ If you have gcloud CLI installed and authenticated:
 # Login to Google Cloud
 gcloud auth login
 
-# Set your project
-gcloud config set project handy-compass-481307-i8
+# Set your project (replace with your actual project ID)
+gcloud config set project YOUR_PROJECT_ID
 
 # The client will automatically use identity token authentication
 python client.py
@@ -136,8 +140,9 @@ python client.py
 If your organization allows it, you can make the service publicly accessible:
 
 ```bash
+# Replace YOUR_REGION with your actual region
 gcloud run services add-iam-policy-binding audio-echo-server \
-  --region=asia-south1 \
+  --region=YOUR_REGION \
   --member=allUsers \
   --role=roles/run.invoker
 ```
@@ -168,9 +173,10 @@ The deployment uses these settings:
 
 ### Change Region
 
-The deployment is configured for `asia-south1` region. To change it, edit `cloudbuild.yaml` and update:
+The deployment region is configured in `cloudbuild.yaml` and `deploy.sh`. To change it, update:
 - The `--region` parameter in the deploy step
 - The Artifact Registry path if using a different region's registry
+- The `REGION` variable in `deploy.sh`
 
 ### Adjust Resources
 
@@ -188,13 +194,14 @@ Modify memory/CPU in `cloudbuild.yaml`:
 View logs:
 
 ```bash
-gcloud run services logs read audio-echo-server --region asia-south1
+# Replace YOUR_REGION with your actual region
+gcloud run services logs read audio-echo-server --region YOUR_REGION
 ```
 
 View service details:
 
 ```bash
-gcloud run services describe audio-echo-server --region asia-south1
+gcloud run services describe audio-echo-server --region YOUR_REGION
 ```
 
 ## Cost Considerations
@@ -229,8 +236,9 @@ This means the Docker image was built for the wrong architecture (likely ARM64 o
 
 ```bash
 # Rebuild with --platform linux/amd64 flag
-docker build --platform linux/amd64 -t asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy/audio-echo-server .
-docker push asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy/audio-echo-server
+# Replace placeholders with your actual values
+docker build --platform linux/amd64 -t YOUR_REGION-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY/audio-echo-server .
+docker push YOUR_REGION-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY/audio-echo-server
 ```
 
 Cloud Build automatically handles this, but manual builds on Apple Silicon (M1/M2) require the `--platform linux/amd64` flag.
@@ -256,8 +264,9 @@ Or manually:
 
 ```bash
 # Build for linux/amd64 (required for Cloud Run, especially on Apple Silicon)
-docker build --platform linux/amd64 -t asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy/audio-echo-server .
-docker push asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy/audio-echo-server
-gcloud run deploy audio-echo-server --image asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy/audio-echo-server --region asia-south1
+# Replace placeholders with your actual values
+docker build --platform linux/amd64 -t YOUR_REGION-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY/audio-echo-server .
+docker push YOUR_REGION-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY/audio-echo-server
+gcloud run deploy audio-echo-server --image YOUR_REGION-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY/audio-echo-server --region YOUR_REGION
 ```
 

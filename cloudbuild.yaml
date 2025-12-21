@@ -1,11 +1,11 @@
 steps:
   # Build the container image for linux/amd64 (required for Cloud Run)
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '--platform', 'linux/amd64', '-t', 'asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy/audio-echo-server', '.']
+    args: ['build', '--platform', 'linux/amd64', '-t', '${_REGISTRY_PATH}/audio-echo-server', '.']
   
   # Push the container image to Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy/audio-echo-server']
+    args: ['push', '${_REGISTRY_PATH}/audio-echo-server']
   
   # Deploy container image to Cloud Run
   - name: 'gcr.io/cloud-builders/gcloud'
@@ -14,7 +14,7 @@ steps:
       - 'deploy'
       - 'audio-echo-server'
       - '--image'
-      - 'asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy/audio-echo-server'
+      - '${_REGISTRY_PATH}/audio-echo-server'
       - '--region'
       - 'asia-south1'
       - '--platform'
@@ -32,5 +32,8 @@ steps:
       - '10'
 
 images:
-  - 'asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy/audio-echo-server'
+  - '${_REGISTRY_PATH}/audio-echo-server'
+
+substitutions:
+  _REGISTRY_PATH: 'YOUR_REGION-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY'
 
