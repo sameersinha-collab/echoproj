@@ -110,6 +110,38 @@ The system uses standard ASR audio settings:
 - Async WebSocket communication
 - Queue-based audio playback for smooth streaming
 
+## Deployment to Google Cloud Run
+
+The server can be deployed to Google Cloud Run for cloud hosting. See [DEPLOY.md](DEPLOY.md) for detailed instructions.
+
+**Configuration:**
+- **Project**: `handy-compass-481307-i8`
+- **Artifact Registry**: `asia-south1-docker.pkg.dev/handy-compass-481307-i8/zippy`
+- **Region**: `asia-south1`
+
+**Quick deploy:**
+```bash
+# Run deployment script (no need to set PROJECT_ID, it's configured)
+./deploy.sh
+```
+
+Or use Cloud Build directly:
+```bash
+gcloud builds submit --config cloudbuild.yaml
+```
+
+After deployment, update your client to use the Cloud Run URL with `wss://` (secure WebSocket).
+
+### Authentication
+
+The server supports API key authentication that works for everyone (no gcloud required):
+
+1. Generate an API key: `python generate_api_key.py`
+2. Set it on Cloud Run: `gcloud run services update audio-echo-server --region=asia-south1 --set-env-vars="API_KEY=your-key"`
+3. Use it in the client: `API_KEY=your-key python client.py`
+
+See [DEPLOY.md](DEPLOY.md) for detailed authentication options.
+
 ## Troubleshooting
 
 ### No audio input/output devices found
@@ -121,6 +153,7 @@ The system uses standard ASR audio settings:
 - Ensure the server is running before starting the client
 - Check firewall settings if using remote connections
 - Verify the server URL matches in both files
+- For Cloud Run: Use `wss://` (not `ws://`) for HTTPS URLs
 
 ### Audio quality issues
 - Ensure your microphone supports 16kHz sample rate

@@ -11,6 +11,8 @@ import pyaudio
 import numpy as np
 import threading
 import queue
+import subprocess
+import os
 from typing import Optional
 
 # Audio configuration matching ASR standards
@@ -23,8 +25,9 @@ DEFAULT_FORMAT = pyaudio.paInt16
 class AudioEchoClient:
     """WebSocket client for audio streaming with echo playback."""
     
-    def __init__(self, server_url: str = "ws://localhost:8765"):
+    def __init__(self, server_url: str = "wss://audio-echo-server-388996421538.asia-south1.run.app", api_key: str = "Oe3yxB9OatobNswqGpDizsiSuzESDgKt"):
         self.server_url = server_url
+        self.api_key = api_key or os.getenv("API_KEY")  # API key for token authentication
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None
         
         # Audio configuration (will be updated from server)
@@ -196,11 +199,51 @@ class AudioEchoClient:
         
         self.stop_playback()
     
+    def get_identity_token(self) -> Optional[str]:
+        """Get Google Cloud identity token for authenticated requests."""
+        try:
+            # Try to get identity token using gcloud
+            result = subprocess.run(
+                ['gcloud', 'auth', 'print-identity-token'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
+            pass
+        return None
+    
     async def connect(self):
         """Connect to WebSocket server."""
         try:
             print(f"Connecting to {self.server_url}...")
-            self.websocket = await websockets.connect(self.server_url)
+            
+            # Priority: 1) API key, 2) gcloud identity token, 3) no auth
+            headers = {}
+            connection_url = self.server_url
+            
+            # Use API key if provided (simplest, works for everyone)
+            if self.api_key:
+                # Add token as query parameter (works better with WebSocket)
+                separator = "&" if "?" in connection_url else "?"
+                connection_url = f"{connection_url}{separator}token={self.api_key}"
+                print("Using API key authentication...")
+            else:
+                # Fallback to gcloud identity token if available
+                identity_token = self.get_identity_token()
+                if identity_token:
+                    headers['Authorization'] = f'Bearer {identity_token}'
+                    print("Using Google Cloud identity token authentication...")
+            
+            # Connect with headers if available
+            # websockets 12.0+ uses additional_headers as a list of (key, value) tuples
+            connect_kwargs = {}
+            if headers:
+                connect_kwargs['additional_headers'] = list(headers.items())
+            
+            self.websocket = await websockets.connect(connection_url, **connect_kwargs)
             self.is_connected = True
             self.loop = asyncio.get_running_loop()
             print("Connected to server!")
@@ -273,7 +316,12 @@ def print_menu():
 
 async def main():
     """Main entry point."""
-    client = AudioEchoClient(server_url="ws://localhost:8765")
+    # Get API key from environment or use None (will try gcloud token as fallback)
+    api_key = os.getenv("API_KEY")
+    client = AudioEchoClient(
+        server_url="wss://audio-echo-server-388996421538.asia-south1.run.app",
+        api_key=api_key
+    )
     
     # Start connection in background task
     connect_task = asyncio.create_task(client.run())

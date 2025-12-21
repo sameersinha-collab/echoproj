@@ -8,6 +8,7 @@ import asyncio
 import websockets
 import json
 import time
+import os
 from collections import deque
 from typing import Dict, Deque, Tuple
 
@@ -47,14 +48,59 @@ class AudioBuffer:
 class AudioEchoServer:
     """WebSocket server that echoes audio with delay."""
     
-    def __init__(self, host: str = "localhost", port: int = 8765):
+    def __init__(self, host: str = "localhost", port: int = 8765, api_key: str = None):
         self.host = host
         self.port = port
+        self.api_key = api_key or os.getenv("API_KEY")  # API key for simple token auth
         self.clients: Dict[websockets.WebSocketServerProtocol, AudioBuffer] = {}
+    
+    def validate_token(self, path: str, headers: dict) -> bool:
+        """Validate API token from query parameter or header."""
+        if not self.api_key:
+            return True  # No API key required
+        
+        # Check query parameter (most common for WebSocket)
+        if path and "?" in path:
+            query_string = path.split("?")[1]
+            params = {}
+            for param in query_string.split("&"):
+                if "=" in param:
+                    key, value = param.split("=", 1)
+                    params[key] = value
+            if params.get("token") == self.api_key or params.get("api_key") == self.api_key:
+                return True
+        
+        # Check Authorization header
+        auth_header = headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            if token == self.api_key:
+                return True
+        
+        # Check X-API-Key header
+        if headers.get("X-API-Key") == self.api_key:
+            return True
+        
+        return False
     
     async def handle_client(self, websocket, path=None):
         """Handle a new client connection."""
         client_addr = websocket.remote_address
+        
+        # Validate token if API key is set
+        if self.api_key:
+            # Get headers from websocket request
+            headers = {}
+            if hasattr(websocket, 'request_headers'):
+                headers = dict(websocket.request_headers)
+            elif hasattr(websocket, 'headers'):
+                headers = dict(websocket.headers)
+            
+            if not self.validate_token(path or "", headers):
+                print(f"Authentication failed for {client_addr}")
+                await websocket.close(code=4001, reason="Invalid API key")
+                return
+        
         print(f"Client connected: {client_addr}")
         
         # Create audio buffer for this client
@@ -130,7 +176,18 @@ class AudioEchoServer:
 
 def main():
     """Main entry point."""
-    server = AudioEchoServer(host="localhost", port=8765)
+    # Read host and port from environment variables (for Cloud Run)
+    # Default to localhost:8765 for local development
+    host = os.getenv("HOST", "0.0.0.0")  # 0.0.0.0 for Cloud Run, localhost for local
+    port = int(os.getenv("PORT", "8765"))  # Cloud Run sets PORT env var
+    api_key = os.getenv("API_KEY")  # Optional API key for authentication
+    
+    if api_key:
+        print("API key authentication enabled")
+    else:
+        print("No API key set - allowing unauthenticated access")
+    
+    server = AudioEchoServer(host=host, port=port, api_key=api_key)
     try:
         asyncio.run(server.start())
     except KeyboardInterrupt:
