@@ -51,7 +51,8 @@ class AudioEchoServer:
     def __init__(self, host: str = "localhost", port: int = 8765, api_key: str = None):
         self.host = host
         self.port = port
-        self.api_key = api_key or os.getenv("API_KEY")  # API key for simple token auth
+        # API authentication disabled - allow all connections
+        self.api_key = None  # Set to: api_key or os.getenv("API_KEY") to re-enable
         self.clients: Dict[websockets.WebSocketServerProtocol, AudioBuffer] = {}
     
     def validate_token(self, path: str, headers: dict) -> bool:

@@ -233,13 +233,13 @@ class AudioEchoClient:
             if self.api_key:
                 # Add token as query parameter (works better with WebSocket)
                 separator = "&" if "?" in connection_url else "?"
-                connection_url = f"{connection_url}{separator}token={self.api_key}"
+                #connection_url = f"{connection_url}{separator}token={self.api_key}"
                 print("Using API key authentication...")
             else:
                 # Fallback to gcloud identity token if available
                 identity_token = self.get_identity_token()
                 if identity_token:
-                    headers['Authorization'] = f'Bearer {identity_token}'
+                    #headers['Authorization'] = f'Bearer {identity_token}'
                     print("Using Google Cloud identity token authentication...")
             
             # Connect with headers if available
@@ -271,7 +271,7 @@ class AudioEchoClient:
             self.playback_thread.start()
             
             # Handle messages from server
-            async for message in self.websocket:
+            async for message in self.websocket: 
                 if isinstance(message, bytes):
                     # Audio data received - add to playback queue
                     self.audio_output_queue.put(message)
