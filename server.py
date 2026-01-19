@@ -9,6 +9,8 @@ import asyncio
 import websockets
 import json
 import os
+import sys
+import logging
 from typing import Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -16,6 +18,14 @@ from google import genai
 from google.genai import types
 
 from agents import get_agent_config, get_voice_profile, DEFAULT_AGENT, DEFAULT_VOICE_PROFILE
+
+# Configure logging for Cloud Run (writes to stderr which Cloud Logging captures)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stderr
+)
+logger = logging.getLogger(__name__)
 
 # Audio configuration
 INPUT_SAMPLE_RATE = 16000   # Client sends 16kHz
@@ -33,7 +43,7 @@ class VoiceAIServer:
     def __init__(self, host: str = "0.0.0.0", port: int = 8765):
         self.host = host
         self.port = port
-        self.gemini_api_key = os.getenv("GEMINI_API_KEY", "AIzaSyBLuDmKKHZa5-zfl-5BhpiFN0q1VY83Nto")
+        self.gemini_api_key = os.getenv("GEMINI_API_KEY", "")
         self.gemini_client = genai.Client(api_key=self.gemini_api_key)
     
     def parse_connection_params(self, path: str) -> dict:
@@ -60,13 +70,13 @@ class VoiceAIServer:
     async def handle_client(self, websocket, path=None):
         """Handle a new client connection."""
         client_addr = websocket.remote_address
-        print(f"\nClient connected: {client_addr}")
+        logger.info(f"Client connected: {client_addr}")
         
         params = self.parse_connection_params(path or "")
         agent_config = get_agent_config(params["agent_name"])
         
-        print(f"  Agent: {agent_config['name']}")
-        print(f"  Trigger: {params['trigger']}")
+        logger.info(f"Agent: {agent_config['name']}")
+        logger.info(f"Trigger: {params['trigger']}")
         
         is_active = True
         
@@ -92,13 +102,14 @@ class VoiceAIServer:
                 )
             )
             
-            print(f"  Connecting to Gemini: {GEMINI_MODEL}...")
+            logger.info(f"Connecting to Gemini: {GEMINI_MODEL}...")
+            logger.info(f"API Key (first 10 chars): {self.gemini_api_key[:10]}...")
             
             async with self.gemini_client.aio.live.connect(
                 model=GEMINI_MODEL,
                 config=gemini_config
             ) as gemini_session:
-                print(f"  ✅ Gemini session ready - waiting for user to speak")
+                logger.info("Gemini session ready - waiting for user to speak")
                 
                 async def receive_from_client():
                     """Receive audio from client and forward to Gemini."""
@@ -130,7 +141,7 @@ class VoiceAIServer:
                     except websockets.exceptions.ConnectionClosed:
                         pass
                     except Exception as e:
-                        print(f"  Error from client: {e}")
+                        logger.error(f"Error from client: {e}")
                     finally:
                         is_active = False
                 
@@ -138,7 +149,7 @@ class VoiceAIServer:
                     """Receive responses from Gemini and forward to client."""
                     nonlocal is_active
                     try:
-                        print("  📥 Listening for Gemini responses...")
+                        logger.info("Listening for Gemini responses...")
                         while is_active:
                             async for response in gemini_session.receive():
                                 if not is_active:
@@ -154,22 +165,22 @@ class VoiceAIServer:
                                     
                                     if response.server_content.turn_complete:
                                         await websocket.send(json.dumps({"type": "turn_complete"}))
-                                        print("  🎯 Turn complete - ready for next")
+                                        logger.info("Turn complete - ready for next")
                             
                             # receive() ended, wait briefly and try again
                             await asyncio.sleep(0.05)
                                     
                     except websockets.exceptions.ConnectionClosed:
-                        print("  📥 Client WebSocket closed")
+                        logger.info("Client WebSocket closed")
                     except asyncio.CancelledError:
                         pass
                     except Exception as e:
-                        print(f"  📥 Gemini error: {e}")
+                        logger.error(f"Gemini error: {e}")
                     finally:
                         is_active = False
                 
                 # Run both tasks
-                print(f"  🚀 Starting streaming... (speak into mic after typing 'start')")
+                logger.info("Starting streaming... (speak into mic after typing 'start')")
                 receive_task = asyncio.create_task(receive_from_client())
                 send_task = asyncio.create_task(send_to_client())
                 
@@ -188,18 +199,16 @@ class VoiceAIServer:
                         pass
                         
         except websockets.exceptions.ConnectionClosed:
-            print(f"Client disconnected: {client_addr}")
+            logger.info(f"Client disconnected: {client_addr}")
         except Exception as e:
-            print(f"Error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Error: {e}", exc_info=True)
         finally:
-            print(f"Session ended: {client_addr}")
+            logger.info(f"Session ended: {client_addr}")
     
     async def start(self):
         """Start the WebSocket server."""
-        print(f"Starting Voice AI Server on ws://{self.host}:{self.port}")
-        print(f"Model: {GEMINI_MODEL}")
+        logger.info(f"Starting Voice AI Server on ws://{self.host}:{self.port}")
+        logger.info(f"Model: {GEMINI_MODEL}")
         
         async def handler(websocket, path=None):
             await self.handle_client(websocket, path)
@@ -216,7 +225,7 @@ def main():
         server = VoiceAIServer(host=host, port=port)
         asyncio.run(server.start())
     except KeyboardInterrupt:
-        print("\nShutting down...")
+        logger.info("Shutting down...")
 
 
 if __name__ == "__main__":
