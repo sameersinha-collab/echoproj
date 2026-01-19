@@ -1,41 +1,51 @@
 #!/usr/bin/env python3
 """
-WebSocket Audio Echo Client
-Captures microphone audio, sends it via WebSocket, and plays delayed audio back.
+WebSocket Voice AI Client
+Captures microphone audio, sends it via WebSocket to Voice AI server,
+and plays AI-generated audio responses through speakers.
 """
 
 import asyncio
 import websockets
 import json
 import pyaudio
-import numpy as np
 import threading
 import queue
-import subprocess
 import os
 from typing import Optional
 
-# Audio configuration matching ASR standards
-DEFAULT_SAMPLE_RATE = 16000
-DEFAULT_CHUNK_SIZE = 4096  # Standard chunk size for ASR
-DEFAULT_CHANNELS = 1
-DEFAULT_SAMPLE_WIDTH = 2  # 16-bit = 2 bytes
-DEFAULT_FORMAT = pyaudio.paInt16
+# Audio configuration - Input (microphone)
+INPUT_SAMPLE_RATE = 16000
+INPUT_CHUNK_SIZE = 4096  # ~256ms chunks at 16kHz
+INPUT_CHANNELS = 1
+INPUT_FORMAT = pyaudio.paInt16
 
-class AudioEchoClient:
-    """WebSocket client for audio streaming with echo playback."""
+# Audio configuration - Output (speaker) - Gemini outputs 24kHz
+OUTPUT_SAMPLE_RATE = 24000
+OUTPUT_CHUNK_SIZE = 6144  # ~256ms chunks at 24kHz
+OUTPUT_CHANNELS = 1
+OUTPUT_FORMAT = pyaudio.paInt16
+
+
+class VoiceAIClient:
+    """WebSocket client for Voice AI streaming."""
     
-    def __init__(self, server_url: str = "wss://audio-echo-server-388996421538.asia-south1.run.app", api_key: str = "Oe3yxB9OatobNswqGpDizsiSuzESDgKt"):
-        self.server_url = server_url
-        self.api_key = api_key or os.getenv("API_KEY")  # API key for token authentication
-        self.websocket: Optional[websockets.WebSocketClientProtocol] = None
+    def __init__(
+        self,
+        server_url: str = "ws://localhost:8765",
+        agent_name: str = "default",
+        voice_profile: str = "indian_female",
+        trigger: str = ""
+    ):
+        self.base_url = server_url
+        self.agent_name = agent_name
+        self.voice_profile = voice_profile
+        self.trigger = trigger
         
-        # Audio configuration (will be updated from server)
-        self.sample_rate = DEFAULT_SAMPLE_RATE
-        self.chunk_size = DEFAULT_CHUNK_SIZE
-        self.channels = DEFAULT_CHANNELS
-        self.sample_width = DEFAULT_SAMPLE_WIDTH
-        self.format = DEFAULT_FORMAT
+        # Build connection URL with parameters
+        self.server_url = self._build_url()
+        
+        self.websocket: Optional[websockets.WebSocketClientProtocol] = None
         
         # PyAudio instance
         self.audio = pyaudio.PyAudio()
@@ -47,6 +57,7 @@ class AudioEchoClient:
         # Control flags
         self.is_recording = False
         self.is_connected = False
+        self.is_ai_speaking = False  # Half-duplex: mute mic while AI speaks
         
         # Queues for audio data
         self.audio_output_queue = queue.Queue()
@@ -54,6 +65,27 @@ class AudioEchoClient:
         # Threads
         self.recording_thread: Optional[threading.Thread] = None
         self.playback_thread: Optional[threading.Thread] = None
+        
+        # Event loop reference
+        self.loop = None
+        
+        # Transcript storage for evaluation
+        self.transcripts = []
+    
+    def _build_url(self) -> str:
+        """Build WebSocket URL with query parameters."""
+        params = []
+        if self.agent_name:
+            params.append(f"agent_name={self.agent_name}")
+        if self.voice_profile:
+            params.append(f"voice_profile={self.voice_profile}")
+        if self.trigger:
+            params.append(f"trigger={self.trigger}")
+        
+        if params:
+            separator = "&" if "?" in self.base_url else "?"
+            return f"{self.base_url}{separator}{'&'.join(params)}"
+        return self.base_url
     
     def find_input_device(self):
         """Find default input device."""
@@ -61,7 +93,6 @@ class AudioEchoClient:
             device_info = self.audio.get_default_input_device_info()
             return device_info['index']
         except:
-            # Fallback: find any input device
             for i in range(self.audio.get_device_count()):
                 if self.audio.get_device_info_by_index(i)['maxInputChannels'] > 0:
                     return i
@@ -73,7 +104,6 @@ class AudioEchoClient:
             device_info = self.audio.get_default_output_device_info()
             return device_info['index']
         except:
-            # Fallback: find any output device
             for i in range(self.audio.get_device_count()):
                 if self.audio.get_device_info_by_index(i)['maxOutputChannels'] > 0:
                     return i
@@ -96,21 +126,20 @@ class AudioEchoClient:
         
         try:
             self.input_stream = self.audio.open(
-                format=self.format,
-                channels=self.channels,
-                rate=self.sample_rate,
+                format=INPUT_FORMAT,
+                channels=INPUT_CHANNELS,
+                rate=INPUT_SAMPLE_RATE,
                 input=True,
                 input_device_index=input_device,
-                frames_per_buffer=self.chunk_size
+                frames_per_buffer=INPUT_CHUNK_SIZE
             )
             self.is_recording = True
             
-            # Start recording thread if not already running
             if not self.recording_thread or not self.recording_thread.is_alive():
                 self.recording_thread = threading.Thread(target=self.recording_worker, daemon=True)
                 self.recording_thread.start()
             
-            print("Recording started!")
+            print("🎤 Recording started - speak now!")
         except Exception as e:
             print(f"Error starting recording: {e}")
             self.is_recording = False
@@ -126,14 +155,25 @@ class AudioEchoClient:
             self.input_stream.stop_stream()
             self.input_stream.close()
             self.input_stream = None
-        print("Recording stopped!")
+        print("🔇 Recording stopped")
     
     def resume_recording(self):
         """Resume recording (same as start)."""
         self.start_recording()
     
+    def flush_input_buffer(self):
+        """Flush the microphone input buffer to discard echo/feedback."""
+        if self.input_stream:
+            try:
+                # Read and discard any buffered audio
+                available = self.input_stream.get_read_available()
+                if available > 0:
+                    self.input_stream.read(available, exception_on_overflow=False)
+            except Exception:
+                pass
+    
     def start_playback(self):
-        """Start audio playback stream."""
+        """Start audio playback stream at 24kHz."""
         output_device = self.find_output_device()
         if output_device is None:
             print("No output device found!")
@@ -141,14 +181,14 @@ class AudioEchoClient:
         
         try:
             self.output_stream = self.audio.open(
-                format=self.format,
-                channels=self.channels,
-                rate=self.sample_rate,
+                format=OUTPUT_FORMAT,
+                channels=OUTPUT_CHANNELS,
+                rate=OUTPUT_SAMPLE_RATE,  # 24kHz for Gemini output
                 output=True,
                 output_device_index=output_device,
-                frames_per_buffer=self.chunk_size
+                frames_per_buffer=OUTPUT_CHUNK_SIZE
             )
-            print("Playback started!")
+            print("🔊 Playback ready (24kHz)")
         except Exception as e:
             print(f"Error starting playback: {e}")
     
@@ -158,18 +198,17 @@ class AudioEchoClient:
             self.output_stream.stop_stream()
             self.output_stream.close()
             self.output_stream = None
-        print("Playback stopped!")
+        print("Playback stopped")
     
     def recording_worker(self):
         """Worker thread that captures audio and sends it via WebSocket."""
         while self.is_connected and self.is_recording:
             try:
                 if self.input_stream:
-                    # Read audio chunk
-                    audio_data = self.input_stream.read(self.chunk_size, exception_on_overflow=False)
+                    audio_data = self.input_stream.read(INPUT_CHUNK_SIZE, exception_on_overflow=False)
                     
-                    # Send via WebSocket if connected
-                    if self.websocket:
+                    # Half-duplex: only send audio when AI is not speaking
+                    if self.websocket and self.loop and not self.is_ai_speaking:
                         asyncio.run_coroutine_threadsafe(
                             self.websocket.send(audio_data),
                             self.loop
@@ -185,7 +224,6 @@ class AudioEchoClient:
         
         while self.is_connected:
             try:
-                # Get audio chunk from queue (blocking with timeout)
                 try:
                     audio_data = self.audio_output_queue.get(timeout=0.1)
                     if self.output_stream:
@@ -199,110 +237,85 @@ class AudioEchoClient:
         
         self.stop_playback()
     
-    def get_identity_token(self) -> Optional[str]:
-        """Get Google Cloud identity token for authenticated requests."""
-        try:
-            # Try to get identity token using gcloud
-            result = subprocess.run(
-                ['gcloud', 'auth', 'print-identity-token'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
-            pass
-        return None
+    async def send_text(self, text: str):
+        """Send text message to the AI."""
+        if self.websocket and self.is_connected:
+            await self.websocket.send(json.dumps({
+                "type": "text",
+                "text": text
+            }))
+            print(f"📝 You: {text}")
     
     async def connect(self):
         """Connect to WebSocket server."""
         try:
-
-            # Validate URL format
             if not (self.server_url.startswith("ws://") or self.server_url.startswith("wss://")):
-                raise ValueError(f"Invalid WebSocket URL format: {self.server_url}. Must start with ws:// or wss://")
+                raise ValueError(f"Invalid WebSocket URL: {self.server_url}")
             
             print(f"Connecting to {self.server_url}...")
+            print(f"  Agent: {self.agent_name}")
+            print(f"  Voice: {self.voice_profile}")
             
-            # Priority: 1) API key, 2) gcloud identity token, 3) no auth
-            headers = {}
-            connection_url = self.server_url
-            
-            # Use API key if provided (simplest, works for everyone)
-            if self.api_key:
-                # Add token as query parameter (works better with WebSocket)
-                separator = "&" if "?" in connection_url else "?"
-                #connection_url = f"{connection_url}{separator}token={self.api_key}"
-                print("Using API key authentication...")
-            else:
-                # Fallback to gcloud identity token if available
-                identity_token = self.get_identity_token()
-                if identity_token:
-                    #headers['Authorization'] = f'Bearer {identity_token}'
-                    print("Using Google Cloud identity token authentication...")
-            
-            # Connect with headers if available
-            # websockets 12.0+ uses additional_headers as a list of (key, value) tuples
-            connect_kwargs = {}
-            if headers:
-                connect_kwargs['additional_headers'] = list(headers.items())
-            
-            try:
-                self.websocket = await websockets.connect(connection_url, **connect_kwargs)
-                self.is_connected = True
-                self.loop = asyncio.get_running_loop()
-                print("Connected to server!")
-            except websockets.exceptions.InvalidStatusCode as e:
-                print(f"Connection failed with status {e.status_code}: {e}")
-                if e.status_code == 403:
-                    print("\nPossible causes:")
-                    print("  - Service requires authentication but token is invalid")
-                    print("  - Organization policy blocking access")
-                    print("  - Try using API key authentication instead")
-                elif e.status_code == 404:
-                    print("\nPossible causes:")
-                    print("  - Server URL is incorrect")
-                    print("  - Service is not deployed or not running")
-                raise
+            self.websocket = await websockets.connect(self.server_url)
+            self.is_connected = True
+            self.loop = asyncio.get_running_loop()
+            print("✅ Connected to Voice AI server!")
             
             # Start playback thread
             self.playback_thread = threading.Thread(target=self.playback_worker, daemon=True)
             self.playback_thread.start()
             
             # Handle messages from server
-            async for message in self.websocket: 
+            print("📡 Waiting for messages from server...")
+            async for message in self.websocket:
                 if isinstance(message, bytes):
-                    # Audio data received - add to playback queue
+                    # Audio data - add to playback queue
+                    # Half-duplex: mute mic while AI speaks
+                    if not self.is_ai_speaking:
+                        self.is_ai_speaking = True
+                        print("🔇 AI speaking (mic muted)...")
                     self.audio_output_queue.put(message)
+                    
                 elif isinstance(message, str):
-                    # Control message
                     try:
                         data = json.loads(message)
-                        if data.get("type") == "config":
-                            # Update configuration from server
+                        msg_type = data.get("type")
+                        
+                        if msg_type == "config":
                             config = data.get("data", {})
-                            self.sample_rate = config.get("sample_rate", self.sample_rate)
-                            self.chunk_size = config.get("chunk_size", self.chunk_size)
-                            self.channels = config.get("channels", self.channels)
-                            self.sample_width = config.get("sample_width", self.sample_width)
-                            print(f"Configuration received: {config}")
-                        elif data.get("type") == "pong":
-                            pass  # Heartbeat response
+                            print(f"📋 Server config: {config}")
+                            
+                        elif msg_type == "transcript":
+                            role = data.get("role", "")
+                            text = data.get("text", "")
+                            if role == "assistant":
+                                print(f"🤖 AI: {text}")
+                            self.transcripts.append({"role": role, "text": text})
+                            
+                        elif msg_type == "turn_complete":
+                            # Half-duplex: unmute mic after AI finishes
+                            # Wait for playback queue to drain
+                            while not self.audio_output_queue.empty():
+                                await asyncio.sleep(0.1)
+                            # Extra delay for speaker audio to fade
+                            await asyncio.sleep(0.8)
+                            # Flush mic buffer to discard any echo
+                            self.flush_input_buffer()
+                            self.is_ai_speaking = False
+                            print("🎤 Your turn (mic active)")
+                            
+                        elif msg_type == "pong":
+                            pass
+                            
                     except json.JSONDecodeError:
                         pass
             
+            print("⚠️ Message loop ended - server stopped sending")
+            
         except websockets.exceptions.ConnectionClosed as e:
-            print(f"Connection closed by server: {e}")
-        except websockets.exceptions.InvalidStatusCode as e:
-            print(f"HTTP error {e.status_code}: {e}")
-            if e.status_code == 403:
-                print("\nAuthentication failed. Try:")
-                print("  1. Set API_KEY environment variable: export API_KEY=your-key")
-                print("  2. Or ensure gcloud is authenticated: gcloud auth login")
-        except websockets.exceptions.InvalidURI as e:
-            print(f"Invalid server URL: {e}")
-            print(f"  Current URL: {self.server_url}")
+            print(f"🔌 Connection closed: code={e.code}, reason={e.reason}")
+        except websockets.exceptions.InvalidStatus as e:
+            print(f"Connection rejected: HTTP {e.response.status_code}")
         except Exception as e:
             print(f"Connection error: {type(e).__name__}: {e}")
             import traceback
@@ -314,7 +327,7 @@ class AudioEchoClient:
                 await self.websocket.close()
     
     async def run(self):
-        """Run the client (connect and handle messages)."""
+        """Run the client."""
         await self.connect()
     
     def cleanup(self):
@@ -330,58 +343,62 @@ class AudioEchoClient:
             self.playback_thread.join(timeout=1.0)
         
         self.audio.terminate()
+        
+        # Save transcripts for evaluation
+        if self.transcripts:
+            print("\n📝 Session Transcript:")
+            for entry in self.transcripts:
+                role = "You" if entry["role"] == "user" else "AI"
+                print(f"  [{role}]: {entry['text']}")
+
 
 def print_menu():
     """Print control menu."""
-    print("\n" + "="*50)
-    print("Audio Echo Client - Control Menu")
-    print("="*50)
+    print("\n" + "="*60)
+    print("Voice AI Client - Control Menu")
+    print("="*60)
     print("Commands:")
-    print("  start  - Start/resume microphone recording")
-    print("  stop   - Stop microphone recording")
-    print("  resume - Resume microphone recording (same as start)")
-    print("  quit   - Exit the client")
-    print("="*50 + "\n")
+    print("  start   - Start microphone recording")
+    print("  stop    - Stop microphone recording")
+    print("  resume  - Resume microphone recording")
+    print("  text    - Send text message to AI")
+    print("  quit    - Exit the client")
+    print("="*60 + "\n")
+
 
 async def main():
     """Main entry point."""
-    # Get API key from environment or use None (will try gcloud token as fallback)
-    api_key = os.getenv("API_KEY")
+    # Configuration from environment or defaults
+    server_url = os.getenv("SERVER_URL", "ws://localhost:8765")
+    agent_name = os.getenv("AGENT_NAME", "default")
+    voice_profile = os.getenv("VOICE_PROFILE", "indian_female")
+    trigger = os.getenv("TRIGGER", "")
     
-    # Warn if API key is not set
-    if not api_key:
-        print("⚠️  WARNING: API_KEY environment variable not set!")
-        print("   Set it with: export API_KEY=your-api-key-here")
-        print("   Or pass it: API_KEY=your-key python client.py")
-        print("   Attempting connection without API key (may fail if server requires auth)...\n")
+    print("\n🎙️  Voice AI Client")
+    print("="*60)
     
-    # Get server URL from environment or use default
-    server_url = os.getenv("SERVER_URL", "wss://audio-echo-server-388996421538.asia-south1.run.app")
-    
-    if not server_url.startswith(("ws://", "wss://")):
-        print(f"⚠️  ERROR: Invalid server URL: {server_url}")
-        print("   Server URL must start with ws:// or wss://")
-        print("   Set it with: export SERVER_URL=wss://your-server-url")
-        return
-    
-    client = AudioEchoClient(
+    client = VoiceAIClient(
         server_url=server_url,
-        api_key=api_key
+        agent_name=agent_name,
+        voice_profile=voice_profile,
+        trigger=trigger
     )
     
     # Start connection in background task
     connect_task = asyncio.create_task(client.run())
     
-    # Wait a bit for connection
-    await asyncio.sleep(1)
+    # Wait for connection
+    await asyncio.sleep(3)
     
     if not client.is_connected:
-        print("Failed to connect to server. Make sure server is running.")
+        print("❌ Failed to connect to server.")
+        print("   Make sure the server is running and GEMINI_API_KEY is set.")
+        # Don't return immediately - let the user see what happened
+        await asyncio.sleep(1)
         return
     
     print_menu()
     
-    # Handle user input
     loop = asyncio.get_event_loop()
     
     def handle_input():
@@ -399,6 +416,14 @@ async def main():
                 elif command == "resume":
                     client.resume_recording()
                 
+                elif command == "text":
+                    text = input("Enter message: ").strip()
+                    if text:
+                        asyncio.run_coroutine_threadsafe(
+                            client.send_text(text),
+                            client.loop
+                        )
+                
                 elif command == "quit":
                     print("Shutting down...")
                     client.cleanup()
@@ -406,14 +431,14 @@ async def main():
                     break
                 
                 else:
-                    print("Unknown command. Type 'start', 'stop', 'resume', or 'quit'")
+                    print("Unknown command. Type 'start', 'stop', 'text', or 'quit'")
             
             except EOFError:
                 break
             except Exception as e:
-                print(f"Error handling input: {e}")
+                print(f"Error: {e}")
     
-    # Start input handler in separate thread
+    # Start input handler
     input_thread = threading.Thread(target=handle_input, daemon=True)
     input_thread.start()
     
@@ -426,9 +451,9 @@ async def main():
     finally:
         client.cleanup()
 
+
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\nShutting down...")
-

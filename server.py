@@ -1,220 +1,223 @@
 #!/usr/bin/env python3
 """
-WebSocket Audio Echo Server
-Receives audio chunks from clients and streams them back with a 1 second delay.
+WebSocket Voice AI Server
+Receives audio from clients, processes through Gemini Live API, 
+and streams AI-generated audio responses back.
 """
 
 import asyncio
 import websockets
 import json
-import time
 import os
-from collections import deque
-from typing import Dict, Deque, Tuple
+from typing import Dict, Optional
+from urllib.parse import parse_qs, urlparse
 
-# Audio configuration matching ASR standards
-SAMPLE_RATE = 16000
-CHUNK_SIZE = 4096  # Standard chunk size for ASR
+from google import genai
+from google.genai import types
+
+from agents import get_agent_config, get_voice_profile, DEFAULT_AGENT, DEFAULT_VOICE_PROFILE
+
+# Audio configuration
+INPUT_SAMPLE_RATE = 16000   # Client sends 16kHz
+OUTPUT_SAMPLE_RATE = 24000  # Gemini outputs 24kHz
 CHANNELS = 1
 SAMPLE_WIDTH = 2  # 16-bit = 2 bytes
-DELAY_SECONDS = 1.0
 
-class AudioBuffer:
-    """Manages audio chunks with timestamps for delayed playback."""
-    
-    def __init__(self, delay_seconds: float = 1.0):
-        self.delay_seconds = delay_seconds
-        self.chunks: Deque[Tuple[float, bytes]] = deque()  # (timestamp, audio_data)
-    
-    def add_chunk(self, audio_data: bytes):
-        """Add a new audio chunk with current timestamp."""
-        self.chunks.append((time.time(), audio_data))
-    
-    def get_ready_chunks(self) -> list[bytes]:
-        """Get all chunks that are ready to be sent (older than delay)."""
-        current_time = time.time()
-        ready_chunks = []
-        
-        while self.chunks:
-            timestamp, audio_data = self.chunks[0]
-            if current_time - timestamp >= self.delay_seconds:
-                ready_chunks.append(audio_data)
-                self.chunks.popleft()
-            else:
-                break
-        
-        return ready_chunks
+# Gemini model - latest native audio model
+GEMINI_MODEL = "models/gemini-2.5-flash-native-audio-latest"
 
-class AudioEchoServer:
-    """WebSocket server that echoes audio with delay."""
+
+class VoiceAIServer:
+    """WebSocket server that bridges clients to Gemini Live API."""
     
-    def __init__(self, host: str = "localhost", port: int = 8765, api_key: str = None):
+    def __init__(self, host: str = "0.0.0.0", port: int = 8765):
         self.host = host
         self.port = port
-        # API authentication disabled - allow all connections
-        self.api_key = None  # Set to: api_key or os.getenv("API_KEY") to re-enable
-        self.clients: Dict[websockets.WebSocketServerProtocol, AudioBuffer] = {}
+        self.gemini_api_key = os.getenv("GEMINI_API_KEY", "AIzaSyBLuDmKKHZa5-zfl-5BhpiFN0q1VY83Nto")
+        self.gemini_client = genai.Client(api_key=self.gemini_api_key)
     
-    def validate_token(self, path: str, headers: dict) -> bool:
-        """Validate API token from query parameter or header."""
-        if not self.api_key:
-            return True  # No API key required
+    def parse_connection_params(self, path: str) -> dict:
+        """Parse connection parameters from WebSocket path query string."""
+        params = {
+            "agent_name": DEFAULT_AGENT,
+            "voice_profile": DEFAULT_VOICE_PROFILE,
+            "trigger": ""
+        }
         
-        # Check query parameter (most common for WebSocket)
         if path and "?" in path:
-            query_string = path.split("?")[1]
-            params = {}
-            for param in query_string.split("&"):
-                if "=" in param:
-                    key, value = param.split("=", 1)
-                    params[key] = value
-            if params.get("token") == self.api_key or params.get("api_key") == self.api_key:
-                return True
+            query_string = path.split("?", 1)[1]
+            parsed = parse_qs(query_string)
+            
+            if "agent_name" in parsed:
+                params["agent_name"] = parsed["agent_name"][0]
+            if "voice_profile" in parsed:
+                params["voice_profile"] = parsed["voice_profile"][0]
+            if "trigger" in parsed:
+                params["trigger"] = parsed["trigger"][0]
         
-        # Check Authorization header
-        auth_header = headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-            if token == self.api_key:
-                return True
-        
-        # Check X-API-Key header
-        if headers.get("X-API-Key") == self.api_key:
-            return True
-        
-        return False
+        return params
     
     async def handle_client(self, websocket, path=None):
         """Handle a new client connection."""
         client_addr = websocket.remote_address
+        print(f"\nClient connected: {client_addr}")
         
-        # Validate token if API key is set
-        if self.api_key:
-            # Get headers from websocket request
-            headers = {}
-            if hasattr(websocket, 'request_headers'):
-                headers = dict(websocket.request_headers)
-            elif hasattr(websocket, 'headers'):
-                headers = dict(websocket.headers)
-            
-            if not self.validate_token(path or "", headers):
-                print(f"Authentication failed for {client_addr}")
-                await websocket.close(code=4001, reason="Invalid API key")
-                return
+        params = self.parse_connection_params(path or "")
+        agent_config = get_agent_config(params["agent_name"])
         
-        print(f"Client connected: {client_addr}")
+        print(f"  Agent: {agent_config['name']}")
+        print(f"  Trigger: {params['trigger']}")
         
-        # Create audio buffer for this client
-        self.clients[websocket] = AudioBuffer(DELAY_SECONDS)
+        is_active = True
         
         try:
             # Send configuration to client
-            config = {
-                "sample_rate": SAMPLE_RATE,
-                "chunk_size": CHUNK_SIZE,
-                "channels": CHANNELS,
-                "sample_width": SAMPLE_WIDTH
-            }
-            await websocket.send(json.dumps({"type": "config", "data": config}))
+            await websocket.send(json.dumps({
+                "type": "config",
+                "data": {
+                    "input_sample_rate": INPUT_SAMPLE_RATE,
+                    "output_sample_rate": OUTPUT_SAMPLE_RATE,
+                    "channels": CHANNELS,
+                    "sample_width": SAMPLE_WIDTH,
+                    "agent_name": params["agent_name"],
+                    "voice_profile": params["voice_profile"]
+                }
+            }))
             
-            # Start task to send delayed audio chunks
-            send_task = asyncio.create_task(self.send_delayed_audio(websocket))
+            # Build Gemini config
+            gemini_config = types.LiveConnectConfig(
+                response_modalities=["AUDIO"],
+                system_instruction=types.Content(
+                    parts=[types.Part(text=agent_config["system_prompt"])]
+                )
+            )
             
-            # Start keep-alive task to prevent timeout (sends ping every 30 seconds)
-            keep_alive_task = asyncio.create_task(self.keep_alive(websocket))
+            print(f"  Connecting to Gemini: {GEMINI_MODEL}...")
             
-            # Receive audio chunks from client
-            async for message in websocket:
-                if isinstance(message, bytes):
-                    # Audio data received
-                    self.clients[websocket].add_chunk(message)
-                elif isinstance(message, str):
-                    # Control message
+            async with self.gemini_client.aio.live.connect(
+                model=GEMINI_MODEL,
+                config=gemini_config
+            ) as gemini_session:
+                print(f"  ✅ Gemini session ready - waiting for user to speak")
+                
+                async def receive_from_client():
+                    """Receive audio from client and forward to Gemini."""
+                    nonlocal is_active
                     try:
-                        data = json.loads(message)
-                        if data.get("type") == "ping":
-                            await websocket.send(json.dumps({"type": "pong"}))
-                    except json.JSONDecodeError:
+                        async for message in websocket:
+                            if not is_active:
+                                break
+                            if isinstance(message, bytes):
+                                # Audio data
+                                await gemini_session.send_realtime_input(
+                                    audio=types.Blob(
+                                        data=message,
+                                        mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE}"
+                                    )
+                                )
+                            elif isinstance(message, str):
+                                data = json.loads(message)
+                                if data.get("type") == "text":
+                                    text = data.get("text", "")
+                                    if text:
+                                        await gemini_session.send_client_content(
+                                            turns=types.Content(
+                                                role="user",
+                                                parts=[types.Part(text=text)]
+                                            ),
+                                            turn_complete=True
+                                        )
+                    except websockets.exceptions.ConnectionClosed:
                         pass
-            
+                    except Exception as e:
+                        print(f"  Error from client: {e}")
+                    finally:
+                        is_active = False
+                
+                async def send_to_client():
+                    """Receive responses from Gemini and forward to client."""
+                    nonlocal is_active
+                    try:
+                        print("  📥 Listening for Gemini responses...")
+                        while is_active:
+                            async for response in gemini_session.receive():
+                                if not is_active:
+                                    return
+                                
+                                if response.server_content:
+                                    model_turn = response.server_content.model_turn
+                                    if model_turn and model_turn.parts:
+                                        for part in model_turn.parts:
+                                            if hasattr(part, 'inline_data') and part.inline_data:
+                                                if 'audio' in (part.inline_data.mime_type or ''):
+                                                    await websocket.send(part.inline_data.data)
+                                    
+                                    if response.server_content.turn_complete:
+                                        await websocket.send(json.dumps({"type": "turn_complete"}))
+                                        print("  🎯 Turn complete - ready for next")
+                            
+                            # receive() ended, wait briefly and try again
+                            await asyncio.sleep(0.05)
+                                    
+                    except websockets.exceptions.ConnectionClosed:
+                        print("  📥 Client WebSocket closed")
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as e:
+                        print(f"  📥 Gemini error: {e}")
+                    finally:
+                        is_active = False
+                
+                # Run both tasks
+                print(f"  🚀 Starting streaming... (speak into mic after typing 'start')")
+                receive_task = asyncio.create_task(receive_from_client())
+                send_task = asyncio.create_task(send_to_client())
+                
+                # Wait until a task completes
+                done, pending = await asyncio.wait(
+                    [receive_task, send_task],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                is_active = False
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                        
         except websockets.exceptions.ConnectionClosed:
             print(f"Client disconnected: {client_addr}")
         except Exception as e:
-            print(f"Error handling client {client_addr}: {e}")
+            print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
-            # Cleanup
-            if websocket in self.clients:
-                del self.clients[websocket]
-            send_task.cancel()
-            keep_alive_task.cancel()
-            try:
-                await send_task
-            except asyncio.CancelledError:
-                pass
-            try:
-                await keep_alive_task
-            except asyncio.CancelledError:
-                pass
-    
-    async def send_delayed_audio(self, websocket):
-        """Continuously send delayed audio chunks to client."""
-        try:
-            while websocket in self.clients:
-                buffer = self.clients[websocket]
-                ready_chunks = buffer.get_ready_chunks()
-                
-                for chunk in ready_chunks:
-                    try:
-                        await websocket.send(chunk)
-                    except websockets.exceptions.ConnectionClosed:
-                        return
-                
-                # Small sleep to avoid busy waiting
-                await asyncio.sleep(0.01)  # 10ms
-        except asyncio.CancelledError:
-            pass
-    
-    async def keep_alive(self, websocket):
-        """Send periodic ping to keep connection alive and prevent timeout."""
-        try:
-            while websocket in self.clients:
-                await asyncio.sleep(30)  # Send ping every 30 seconds
-                if websocket in self.clients:
-                    try:
-                        await websocket.ping()
-                    except (websockets.exceptions.ConnectionClosed, Exception):
-                        return
-        except asyncio.CancelledError:
-            pass
+            print(f"Session ended: {client_addr}")
     
     async def start(self):
         """Start the WebSocket server."""
-        print(f"Starting Audio Echo Server on ws://{self.host}:{self.port}")
-        # Wrap handler to ensure correct signature for websockets library
+        print(f"Starting Voice AI Server on ws://{self.host}:{self.port}")
+        print(f"Model: {GEMINI_MODEL}")
+        
         async def handler(websocket, path=None):
             await self.handle_client(websocket, path)
+        
         async with websockets.serve(handler, self.host, self.port):
-            await asyncio.Future()  # Run forever
+            await asyncio.Future()
+
 
 def main():
-    """Main entry point."""
-    # Read host and port from environment variables (for Cloud Run)
-    # Default to localhost:8765 for local development
-    host = os.getenv("HOST", "0.0.0.0")  # 0.0.0.0 for Cloud Run, localhost for local
-    port = int(os.getenv("PORT", "8765"))  # Cloud Run sets PORT env var
-    api_key = os.getenv("API_KEY")  # Optional API key for authentication
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8765"))
     
-    if api_key:
-        print("API key authentication enabled")
-    else:
-        print("No API key set - allowing unauthenticated access")
-    
-    server = AudioEchoServer(host=host, port=port, api_key=api_key)
     try:
+        server = VoiceAIServer(host=host, port=port)
         asyncio.run(server.start())
     except KeyboardInterrupt:
-        print("\nServer shutting down...")
+        print("\nShutting down...")
+
 
 if __name__ == "__main__":
     main()
-

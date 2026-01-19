@@ -1,5 +1,5 @@
 #!/bin/bash
-# Quick deployment script for Google Cloud Run
+# Quick deployment script for Voice AI Server to Google Cloud Run
 
 set -e
 
@@ -9,15 +9,21 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${GREEN}Deploying Audio Echo Server to Google Cloud Run...${NC}"
+echo -e "${GREEN}Deploying Voice AI Server to Google Cloud Run...${NC}"
 
 # Set project and registry details
-# Update these with your actual values
 PROJECT_ID="${PROJECT_ID:-YOUR_PROJECT_ID}"
 REGISTRY_PATH="${REGISTRY_PATH:-YOUR_REGION-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY}"
 REGION="${REGION:-YOUR_REGION}"
-IMAGE_NAME="audio-echo-server"
+IMAGE_NAME="voice-ai-server"
 FULL_IMAGE_PATH="${REGISTRY_PATH}/${IMAGE_NAME}"
+
+# Gemini API Key (required)
+if [ -z "$GEMINI_API_KEY" ]; then
+    echo -e "${RED}Error: GEMINI_API_KEY environment variable is required${NC}"
+    echo "  Set it with: export GEMINI_API_KEY=your-api-key"
+    exit 1
+fi
 
 echo -e "${GREEN}Using project: ${PROJECT_ID}${NC}"
 echo -e "${GREEN}Registry: ${REGISTRY_PATH}${NC}"
@@ -45,20 +51,30 @@ gcloud services enable artifactregistry.googleapis.com --quiet
 
 # Configure Docker authentication for Artifact Registry
 echo -e "${GREEN}Configuring Docker authentication...${NC}"
-# Extract region from registry path (format: REGION-docker.pkg.dev/...)
 REGISTRY_HOST=$(echo "$REGISTRY_PATH" | cut -d'/' -f1)
 gcloud auth configure-docker "$REGISTRY_HOST" --quiet
 
-# Submit build
-echo -e "${GREEN}Building and deploying...${NC}"
-gcloud builds submit --config cloudbuild.yaml
+# Build Docker image
+echo -e "${GREEN}Building Docker image...${NC}"
+docker build --platform linux/amd64 -t ${FULL_IMAGE_PATH} .
 
-# Note: Service uses authenticated access by default
-# If you need public access, run manually:
-# gcloud run services add-iam-policy-binding ${IMAGE_NAME} \
-#   --region=${REGION} \
-#   --member=allUsers \
-#   --role=roles/run.invoker
+# Push to Artifact Registry
+echo -e "${GREEN}Pushing to Artifact Registry...${NC}"
+docker push ${FULL_IMAGE_PATH}
+
+# Deploy to Cloud Run
+echo -e "${GREEN}Deploying to Cloud Run...${NC}"
+gcloud run deploy ${IMAGE_NAME} \
+    --image ${FULL_IMAGE_PATH} \
+    --region ${REGION} \
+    --platform managed \
+    --allow-unauthenticated \
+    --port 8080 \
+    --memory 1Gi \
+    --cpu 2 \
+    --timeout 3600 \
+    --max-instances 10 \
+    --set-env-vars "GEMINI_API_KEY=${GEMINI_API_KEY}"
 
 # Get the service URL
 echo -e "${GREEN}Getting service URL...${NC}"
@@ -68,10 +84,10 @@ if [ -n "$SERVICE_URL" ]; then
     echo -e "${GREEN}✓ Deployment successful!${NC}"
     echo -e "${GREEN}Service URL: ${SERVICE_URL}${NC}"
     echo ""
-    echo -e "${YELLOW}Update your client.py to use:${NC}"
-    echo "  client = AudioEchoClient(server_url=\"wss://${SERVICE_URL#https://}\")"
+    echo -e "${YELLOW}Connect with client:${NC}"
+    echo "  export SERVER_URL=\"wss://${SERVICE_URL#https://}\""
+    echo "  python client.py"
 else
     echo -e "${YELLOW}Deployment completed. Get URL with:${NC}"
     echo "  gcloud run services describe ${IMAGE_NAME} --region ${REGION} --format 'value(status.url)'"
 fi
-

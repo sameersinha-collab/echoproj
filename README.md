@@ -1,51 +1,49 @@
-# Audio Echo WebSocket Server & Client
+# Voice AI WebSocket Server & Client
 
-A Python-based WebSocket application that streams live microphone audio and echoes it back with a 1-second delay. Uses standard ASR (Automatic Speech Recognition) audio chunking.
+A Python-based real-time voice AI application powered by **Google Gemini 2.5 Flash**. Stream live microphone audio to an AI agent and receive natural voice responses instantly.
 
 ## Features
 
-- **WebSocket Server**: Receives audio chunks and streams them back with a 1-second delay
-- **WebSocket Client**: 
-  - Captures live microphone audio
-  - Sends audio in streaming fashion via WebSocket
-  - Receives and plays delayed audio through speakers
-  - Start/resume/stop microphone controls
-  - Uses standard ASR chunking (16kHz, 16-bit PCM, mono, 4096 samples per chunk)
+- **Real-time Voice AI**: Bidirectional audio streaming with Gemini Live API
+- **Built-in VAD**: Gemini's internal Voice Activity Detection handles turn-taking
+- **Multiple Agents**: Configurable AI personalities (sales, support, tutor, etc.)
+- **Voice Profiles**: Choose from different TTS voices (default: Indian female)
+- **Session Persistence**: Conversation context maintained throughout the session
+- **Transcript Logging**: Full conversation transcripts for evaluation
+
+## Architecture
+
+```
+┌─────────────┐     WebSocket      ┌─────────────┐     Gemini Live API     ┌─────────────┐
+│   Client    │ ◄──────────────► │   Server    │ ◄────────────────────► │   Gemini    │
+│  (16kHz)    │    Audio/Text     │  (Bridge)   │      Audio/Text        │  2.5 Flash  │
+└─────────────┘                   └─────────────┘                        └─────────────┘
+     │                                  │
+     │ Mic Input (16kHz)               │ Forwards to Gemini
+     │ Speaker Output (24kHz)          │ Streams responses back
+     ▼                                  ▼
+```
 
 ## Requirements
 
-- Python 3.7+
+- Python 3.9+
+- Google Cloud account with Gemini API access
 - PyAudio (requires system audio libraries)
   - macOS: `brew install portaudio`
-  - Linux: `sudo apt-get install portaudio19-dev` (Ubuntu/Debian)
+  - Linux: `sudo apt-get install portaudio19-dev`
   - Windows: Usually included with PyAudio wheel
 
 ## Installation
 
-### 1. Create a Virtual Environment (Recommended)
-
-It's recommended to create a separate Python environment to isolate project dependencies:
+### 1. Create Virtual Environment
 
 ```bash
-# Create a virtual environment
 python3 -m venv venv
-
-# Activate the virtual environment
-# On macOS/Linux:
-source venv/bin/activate
-
-# On Windows:
-# venv\Scripts\activate
-```
-
-Once activated, you'll see `(venv)` in your terminal prompt. To deactivate later, simply run:
-```bash
-deactivate
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
 ### 2. Install System Dependencies
 
-Install system audio libraries (if needed):
 ```bash
 # macOS
 brew install portaudio
@@ -56,118 +54,169 @@ sudo apt-get install portaudio19-dev
 
 ### 3. Install Python Dependencies
 
-With your virtual environment activated:
 ```bash
 pip install -r requirements.txt
+```
+
+### 4. Set Gemini API Key
+
+```bash
+export GEMINI_API_KEY=your-gemini-api-key
 ```
 
 ## Usage
 
 ### Start the Server
 
-In one terminal:
 ```bash
+export GEMINI_API_KEY=your-api-key
 python server.py
 ```
 
-The server will start on `ws://localhost:8765`
+Server starts on `ws://localhost:8765`
 
 ### Start the Client
 
-In another terminal:
 ```bash
 python client.py
 ```
 
 ### Client Commands
 
-Once connected, you can use these commands:
-- `start` - Start/resume microphone recording
-- `stop` - Stop microphone recording
-- `resume` - Resume microphone recording (same as start)
+- `start` - Start microphone recording
+- `stop` - Stop microphone recording  
+- `resume` - Resume microphone recording
+- `text` - Send text message to AI
 - `quit` - Exit the client
+
+### Configuration Options
+
+Set via environment variables:
+
+```bash
+# Server URL (default: ws://localhost:8765)
+export SERVER_URL=wss://your-cloud-run-url
+
+# Agent personality (default, sales_assistant, support_agent, tutor, companion)
+export AGENT_NAME=sales_assistant
+
+# Voice profile (indian_female, indian_male, us_female, us_male, british_female, etc.)
+export VOICE_PROFILE=indian_female
+
+# Custom trigger (for your application logic)
+export TRIGGER=my_trigger
+```
+
+### WebSocket Parameters
+
+Parameters can also be passed via URL query string:
+
+```
+ws://localhost:8765?agent_name=tutor&voice_profile=indian_female&trigger=lesson_1
+```
 
 ## Audio Configuration
 
-The system uses standard ASR audio settings:
-- **Sample Rate**: 16000 Hz
-- **Chunk Size**: 4096 samples
-- **Channels**: 1 (mono)
-- **Sample Width**: 2 bytes (16-bit PCM)
-- **Delay**: 1 second
+| Parameter | Input (Mic) | Output (Speaker) |
+|-----------|-------------|------------------|
+| Sample Rate | 16,000 Hz | 24,000 Hz |
+| Channels | 1 (mono) | 1 (mono) |
+| Format | 16-bit PCM | 16-bit PCM |
+| Chunk Size | 4096 samples | 6144 samples |
 
-## Architecture
+## Available Agents
 
-### Server (`server.py`)
-- Maintains a buffer of audio chunks with timestamps
-- Sends chunks back to clients after 1-second delay
-- Handles multiple clients simultaneously
-- Sends configuration to clients on connection
+| Agent Name | Description |
+|------------|-------------|
+| `default` | Friendly general assistant |
+| `sales_assistant` | Professional sales helper |
+| `support_agent` | Technical support specialist |
+| `interviewer` | Professional interviewer |
+| `tutor` | Patient educational tutor |
+| `companion` | Casual conversational companion |
 
-### Client (`client.py`)
-- Uses PyAudio for microphone capture and speaker playback
-- Separate threads for recording and playback
-- Async WebSocket communication
-- Queue-based audio playback for smooth streaming
+## Available Voice Profiles
+
+| Profile | Voice | Language |
+|---------|-------|----------|
+| `indian_female` (default) | Kore | en-IN |
+| `indian_male` | Puck | en-IN |
+| `us_female` | Kore | en-US |
+| `us_male` | Puck | en-US |
+| `british_female` | Aoede | en-GB |
+| `british_male` | Charon | en-GB |
+| `deep_male` | Fenrir | en-US |
 
 ## Deployment to Google Cloud Run
 
-The server can be deployed to Google Cloud Run for cloud hosting. See [DEPLOY.md](DEPLOY.md) for detailed instructions.
+### Quick Deploy
 
-**Configuration:**
-- Update `cloudbuild.yaml` and `deploy.sh` with your:
-  - **Project ID**: Your Google Cloud project ID
-  - **Artifact Registry**: `YOUR_REGION-docker.pkg.dev/YOUR_PROJECT_ID/YOUR_REPOSITORY`
-  - **Region**: Your preferred region (e.g., `us-central1`, `asia-south1`)
-
-**Quick deploy:**
 ```bash
-# Run deployment script (no need to set PROJECT_ID, it's configured)
+export GEMINI_API_KEY=your-api-key
+export PROJECT_ID=your-project-id
+export REGION=asia-south1
+export REGISTRY_PATH=asia-south1-docker.pkg.dev/your-project/your-repo
+
 ./deploy.sh
 ```
 
-Or use Cloud Build directly:
+### Manual Deploy
+
 ```bash
-gcloud builds submit --config cloudbuild.yaml
+# Build image
+docker build --platform linux/amd64 -t ${REGISTRY_PATH}/voice-ai-server .
+
+# Push
+docker push ${REGISTRY_PATH}/voice-ai-server
+
+# Deploy
+gcloud run deploy voice-ai-server \
+  --image ${REGISTRY_PATH}/voice-ai-server \
+  --region asia-south1 \
+  --allow-unauthenticated \
+  --set-env-vars "GEMINI_API_KEY=${GEMINI_API_KEY}" \
+  --memory 1Gi \
+  --cpu 2 \
+  --timeout 3600
 ```
 
-After deployment, update your client to use the Cloud Run URL with `wss://` (secure WebSocket).
+### Connect to Cloud Run
 
-### Authentication
-
-The server supports API key authentication that works for everyone (no gcloud required):
-
-1. Generate an API key: `python generate_api_key.py`
-2. Set it on Cloud Run: `gcloud run services update audio-echo-server --region=asia-south1 --set-env-vars="API_KEY=your-key"`
-3. Use it in the client: `API_KEY=your-key python client.py`
-
-See [DEPLOY.md](DEPLOY.md) for detailed authentication options.
+```bash
+export SERVER_URL=wss://voice-ai-server-xxxxx.asia-south1.run.app
+python client.py
+```
 
 ## Troubleshooting
 
-### No audio input/output devices found
-- Check your system audio settings
-- On macOS, grant microphone permissions to Terminal/Python
-- Verify PyAudio installation: `python -c "import pyaudio; print(pyaudio.__version__)"`
+### No audio devices found
+- Check system audio settings
+- Grant microphone permissions to Terminal/Python
+- Verify PyAudio: `python -c "import pyaudio; print(pyaudio.__version__)"`
 
 ### Connection errors
-- Ensure the server is running before starting the client
-- Check firewall settings if using remote connections
-- Verify the server URL matches in both files
-- For Cloud Run: Use `wss://` (not `ws://`) for HTTPS URLs
-- **API Key Required**: Set `API_KEY` environment variable:
-  ```bash
-  export API_KEY=your-api-key-here
-  python client.py
-  ```
-- **Server URL**: Set `SERVER_URL` environment variable if different from default:
-  ```bash
-  export SERVER_URL=wss://your-server-url
-  ```
-- See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed troubleshooting steps
+- Ensure server is running
+- Check `GEMINI_API_KEY` is set on server
+- Use `wss://` for Cloud Run URLs
 
 ### Audio quality issues
-- Ensure your microphone supports 16kHz sample rate
-- Check system audio settings for input/output levels
-- Try adjusting chunk size if experiencing latency issues
+- Ensure microphone supports 16kHz
+- Check system audio levels
+- Reduce network latency (deploy server closer to users)
 
+### Gemini API errors
+- Verify API key is valid
+- Check Gemini API quota
+- Ensure model `gemini-2.5-flash-preview-native-audio-dialog` is available
+
+## Files
+
+| File | Description |
+|------|-------------|
+| `server.py` | WebSocket server bridging clients to Gemini |
+| `client.py` | Audio client with mic/speaker handling |
+| `agents.py` | Agent configurations and voice profiles |
+| `requirements.txt` | Python dependencies |
+| `requirements-server.txt` | Server-only dependencies (for Docker) |
+| `Dockerfile` | Container image for Cloud Run |
+| `deploy.sh` | Deployment script |

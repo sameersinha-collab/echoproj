@@ -1,2 +1,3 @@
+# Server-only dependencies (for Docker)
 websockets>=12.0
-
+google-genai>=1.0.0
