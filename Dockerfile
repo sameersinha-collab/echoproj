@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir -r requirements-server.txt
 # Copy application code
 COPY server.py .
 COPY agents.py .
+COPY story_data.py .
 
 # Expose port (Cloud Run will set PORT env var)
 EXPOSE 8080
