@@ -123,7 +123,7 @@ class QATestClient:
 
 def main():
     parser = argparse.ArgumentParser(description="Wippi Q&A Test Client")
-    parser.add_argument("--url", default="ws://localhost:8765", help="Server URL")
+    parser.add_argument("--url", default="wss://voice-ai-qa-388996421538.asia-south1.run.app", help="Server URL")
     parser.add_argument("--story", default="cinderella", help="Story ID")
     parser.add_argument("--chapter", default="1", help="Chapter ID")
     parser.add_argument("--child", default="Kian", help="Child Name")

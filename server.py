@@ -243,8 +243,7 @@ class VoiceAIServer:
 
             async def send_to_client():
                 try:
-                    # Ask first question
-                    await asyncio.sleep(0.5)
+                    # Ask first question immediately after connection
                     await ask_question(0)
 
                     while True:
@@ -272,7 +271,8 @@ class VoiceAIServer:
                                         state["current_question_idx"] += 1
                                         
                                         if state["current_question_idx"] < len(questions):
-                                            await asyncio.sleep(0.2)
+                                            # Reduced delay between feedback and next question
+                                            await asyncio.sleep(0.05)
                                             await ask_question(state["current_question_idx"])
                                         else:
                                             # End of session

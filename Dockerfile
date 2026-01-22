@@ -16,7 +16,7 @@ COPY agents.py .
 COPY story_data.py .
 
 # Expose port (Cloud Run will set PORT env var)
-EXPOSE 8080
+EXPOSE 8765
 
 # Run the server
 CMD ["python", "server.py"]
