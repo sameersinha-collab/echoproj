@@ -20,7 +20,7 @@ async def test_trigger(trigger_name, child_name="Kian"):
         "child_name": child_name,
         "voice_profile": "indian_female"
     }
-    url = f"ws://localhost:8765?{urlencode(params)}"
+    url = f"wss://voice-ai-qa-388996421538.asia-south1.run.app?{urlencode(params)}"
     print(f"Connecting for trigger: {trigger_name}...")
     
     audio = pyaudio.PyAudio()
