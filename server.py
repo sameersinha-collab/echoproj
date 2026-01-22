@@ -182,7 +182,8 @@ class VoiceAIServer:
         }))
 
         agent = get_agent_config("story_qa")
-        system_instruction = f"{agent['system_prompt']}\n\nSTORY: {story.story_name}\nCHAPTER: {chapter.chapter_name}\nCHILD NAME: {params['child_name']}"
+        summary = chapter.summary if hasattr(chapter, 'summary') else ""
+        system_instruction = f"{agent['system_prompt']}\n\nSTORY: {story.story_name}\nCHAPTER: {chapter.chapter_name}\nSUMMARY: {summary}\nCHILD NAME: {params['child_name']}"
         
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
@@ -195,7 +196,12 @@ class VoiceAIServer:
             async def ask_question(idx):
                 if idx < len(questions):
                     q = questions[idx]
-                    prompt = f"Question {idx+1}: Ask the child: \"{q.question_text}\". The expected answer is \"{q.expected_answers[0]}\". Just ask the question clearly."
+                    if idx == 0:
+                        # For the first question, include a brief summary intro
+                        prompt = f"Briefly summarize the chapter in 1-2 friendly sentences for {params['child_name']}, then ask Question 1: \"{q.question_text}\". The expected answer is \"{q.expected_answers[0]}\"."
+                    else:
+                        prompt = f"Question {idx+1}: Ask the child: \"{q.question_text}\". The expected answer is \"{q.expected_answers[0]}\". Just ask the question clearly."
+                    
                     state["question_being_asked"] = True
                     state["audio_sent_this_turn"] = False
                     await gemini_session.send_client_content(
