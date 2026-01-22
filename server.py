@@ -12,6 +12,8 @@ import os
 import sys
 import logging
 import time
+import random
+import csv
 from typing import Dict, Optional, Any
 from urllib.parse import parse_qs, urlparse
 
@@ -38,12 +40,79 @@ SAMPLE_WIDTH = 2
 # Gemini model
 GEMINI_MODEL = "models/gemini-2.5-flash-native-audio-latest"
 
+# Event-based greetings configuration
+GREETINGS_FILE = "Questions - Greetings.csv"
+GREETINGS_CACHE_DIR = "audio_cache"
 
 class VoiceAIServer:
     def __init__(self, host: str = "0.0.0.0", port: int = 8765):
         self.host = host
         self.port = port
         self.gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY", ""))
+        self.greetings = self._load_greetings()
+        if not os.path.exists(GREETINGS_CACHE_DIR):
+            os.makedirs(GREETINGS_CACHE_DIR)
+
+    def _load_greetings(self) -> Dict[str, list]:
+        greetings = {}
+        try:
+            if os.path.exists(GREETINGS_FILE):
+                with open(GREETINGS_FILE, mode='r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        event = row['Event'].strip()
+                        if event not in greetings:
+                            greetings[event] = []
+                        greetings[event].append(row['Message'].strip())
+            else:
+                logger.warning(f"Greetings file {GREETINGS_FILE} not found.")
+        except Exception as e:
+            logger.error(f"Error loading greetings CSV: {e}")
+        return greetings
+
+    async def _get_cached_audio(self, message: str, voice_profile: str) -> Optional[bytes]:
+        # Simple hash-based filename for caching
+        import hashlib
+        msg_hash = hashlib.md5(f"{message}_{voice_profile}".encode()).hexdigest()
+        cache_path = os.path.join(GREETINGS_CACHE_DIR, f"{msg_hash}.pcm")
+        
+        if os.path.exists(cache_path):
+            with open(cache_path, 'rb') as f:
+                return f.read()
+        
+        # If not cached, generate using Gemini (one-time)
+        logger.info(f"Generating audio for message: {message}")
+        agent = get_agent_config("default") # Use default friendly agent
+        config = types.LiveConnectConfig(
+            response_modalities=["AUDIO"],
+            system_instruction=types.Content(parts=[types.Part(text=agent["system_prompt"])])
+        )
+        
+        audio_data = bytearray()
+        try:
+            async with self.gemini_client.aio.live.connect(model=GEMINI_MODEL, config=config) as session:
+                # Ask Gemini to just say the specific message
+                await session.send_client_content(
+                    turns=types.Content(role="user", parts=[types.Part(text=f"Please say exactly this and nothing else: {message}")]),
+                    turn_complete=True
+                )
+                
+                async for response in session.receive():
+                    if response.server_content and response.server_content.model_turn:
+                        for part in response.server_content.model_turn.parts:
+                            if hasattr(part, 'inline_data') and part.inline_data:
+                                audio_data.extend(part.inline_data.data)
+                    if response.server_content and response.server_content.turn_complete:
+                        break
+            
+            if audio_data:
+                with open(cache_path, 'wb') as f:
+                    f.write(audio_data)
+                return bytes(audio_data)
+        except Exception as e:
+            logger.error(f"Error generating cached audio: {e}")
+        
+        return None
 
     def parse_params(self, path: str) -> dict:
         params = {
@@ -52,7 +121,8 @@ class VoiceAIServer:
             "mode": "chat",
             "child_name": "friend",
             "story_id": "cinderella",
-            "chapter_id": "1"
+            "chapter_id": "1",
+            "trigger": ""
         }
         if path and "?" in path:
             parsed = parse_qs(urlparse(path).query)
@@ -71,10 +141,63 @@ class VoiceAIServer:
         params = self.parse_params(actual_path)
         logger.info(f"New {params['mode']} session from {websocket.remote_address} (path: {actual_path})")
 
+        # Handle trigger-based audio events
+        if params["trigger"]:
+            await self.handle_trigger_event(websocket, params)
+            return
+
         if params["mode"] == "qa":
             await self.handle_qa_session(websocket, params)
         else:
             await self.handle_chat_session(websocket, params)
+
+    async def handle_trigger_event(self, websocket, params):
+        trigger = params["trigger"]
+        logger.info(f"Handling trigger event: {trigger}")
+        
+        # Find matching messages for this trigger
+        # The CSV has 'Event' and 'Trigger' columns, let's check both
+        messages = []
+        for event, msgs in self.greetings.items():
+            if trigger.lower() in event.lower():
+                messages.extend(msgs)
+        
+        if not messages:
+            logger.warning(f"No messages found for trigger: {trigger}")
+            await websocket.send(json.dumps({"type": "error", "message": f"No audio for trigger: {trigger}"}))
+            return
+
+        # Pick a random message for variety
+        message = random.choice(messages)
+        # Personalize with child name if placeholder exists (assuming {name} or similar, 
+        # but the CSV seems to have hardcoded 'Kian'. Let's replace 'Kian' with child_name)
+        message = message.replace("Kian", params["child_name"])
+        
+        logger.info(f"Selected message: {message}")
+        
+        # Get cached audio or generate it
+        audio_data = await self._get_cached_audio(message, params["voice_profile"])
+        
+        if audio_data:
+            # Send config first so client knows what's coming
+            await websocket.send(json.dumps({
+                "type": "config",
+                "data": {
+                    "mode": "trigger",
+                    "output_sample_rate": OUTPUT_SAMPLE_RATE
+                }
+            }))
+            
+            # Stream the audio in chunks to simulate real-time
+            chunk_size = 4800 # 100ms of 24kHz 16-bit mono
+            for i in range(0, len(audio_data), chunk_size):
+                await websocket.send(audio_data[i:i+chunk_size])
+                await asyncio.sleep(0.05) # Small delay to not overwhelm
+            
+            await websocket.send(json.dumps({"type": "turn_complete"}))
+            logger.info(f"Trigger audio delivered for: {trigger}")
+        else:
+            await websocket.send(json.dumps({"type": "error", "message": "Failed to generate audio"}))
 
     async def handle_chat_session(self, websocket, params):
         agent = get_agent_config(params["agent_name"])

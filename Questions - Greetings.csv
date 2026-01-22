@@ -1,0 +1,18 @@
+Event,Message,Age,Character,Trigger
+Device Wake Up ,Hi Kian! I’m awake now! Let’s have some fun together!,5,Default,Device Turned On 
+Switched On,Hello Kian! Your friend is ready to play!,5,Default,
+Switched On,Yay! Hi Kian! I’m on,5,Default,
+Morning Wake Up,"Good morning, Kian! Time to wake up and start a happy day!",5,Default,
+Morning Wake Up,"Rise and shine, Kian! Let’s get ready for a fun morning!",5,Default,
+Morning Wake Up,"Good morning, Kian… are you awake?",5,Default,
+Evening Greeting,"Good evening, Kian! How was your fun day?",5,Default,
+Evening Greeting,Hi Kian! It’s evening time. Let’s listen or play!,5,Default,
+Night Greeting,"Good night, Kian. Let’s get cozy and listen quietly.",5,Default,
+Night Greeting,Hi Kian… it’s bedtime. I’m right here with you.,5,Default,
+Night Greeting,"Shhh… good night, Kian.",5,Default,
+Audio Book Card Inserted,"Yay, Kian! A new story is here! Are you ready to listen?",5,Default,
+Audio Book Card Inserted,Ooo! Kian put in a story card! Let’s begin!,5,Default,
+Radio Started,Hi Kian! The radio is on! Let’s listen together.,5,Default,
+Radio Started,"Music time, Kian! Are you listening?",5,Default,
+Conversational AI Started,Hi Kian! You can talk to me now!,5,Default,
+Conversational AI Started,"I’m listening, Kian. What do you want to say?",5,Default,
