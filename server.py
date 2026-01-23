@@ -113,7 +113,7 @@ class VoiceAIServer:
         params = {
             "agent_name": DEFAULT_AGENT,
             "voice_profile": DEFAULT_VOICE_PROFILE,
-            "mode": "chat",
+            "mode": "idle",
             "child_name": "friend",
             "story_id": "cinderella",
             "chapter_id": "1",

@@ -64,8 +64,8 @@ class PersistentClient:
         self.is_active = True
         self.start_audio()
         
-        # Initial connection (defaults to chat)
-        params = {"child_name": self.child_name, "mode": "chat"}
+        # Initial connection (starts in idle)
+        params = {"child_name": self.child_name, "mode": "idle"}
         conn_url = f"{self.url}?{urlencode(params)}"
         print(f"Connecting to {conn_url}...")
         
@@ -123,6 +123,6 @@ class PersistentClient:
             self.audio.terminate()
 
 if __name__ == "__main__":
-    client = PersistentClient("ws://localhost:8765")
+    client = PersistentClient("wss://voice-ai-pers-388996421538.asia-south1.run.app")
     asyncio.run(client.connect())
 
