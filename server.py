@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-WebSocket Voice AI Server (Pre-Optimization Version)
-Receives audio from clients, processes through Gemini Live API, 
-and streams AI-generated audio responses back.
+WebSocket Voice AI Server
+Supports single persistent connection with internal agent switching and session management.
 """
 
 import asyncio
@@ -14,7 +13,8 @@ import logging
 import time
 import random
 import csv
-from typing import Dict, Optional, Any
+import hashlib
+from typing import Dict, Optional, Any, List
 from urllib.parse import parse_qs, urlparse
 
 from google import genai
@@ -40,9 +40,10 @@ SAMPLE_WIDTH = 2
 # Gemini model
 GEMINI_MODEL = "models/gemini-2.5-flash-native-audio-latest"
 
-# Event-based greetings configuration
+# Configuration
 GREETINGS_FILE = "Questions - Greetings.csv"
 GREETINGS_CACHE_DIR = "audio_cache"
+SESSION_TIMEOUT_SECONDS = 180  # 3 minutes
 
 class VoiceAIServer:
     def __init__(self, host: str = "0.0.0.0", port: int = 8765):
@@ -53,7 +54,7 @@ class VoiceAIServer:
         if not os.path.exists(GREETINGS_CACHE_DIR):
             os.makedirs(GREETINGS_CACHE_DIR)
 
-    def _load_greetings(self) -> Dict[str, list]:
+    def _load_greetings(self) -> Dict[str, List[str]]:
         greetings = {}
         try:
             if os.path.exists(GREETINGS_FILE):
@@ -71,8 +72,6 @@ class VoiceAIServer:
         return greetings
 
     async def _get_cached_audio(self, message: str, voice_profile: str) -> Optional[bytes]:
-        # Simple hash-based filename for caching
-        import hashlib
         msg_hash = hashlib.md5(f"{message}_{voice_profile}".encode()).hexdigest()
         cache_path = os.path.join(GREETINGS_CACHE_DIR, f"{msg_hash}.pcm")
         
@@ -80,9 +79,8 @@ class VoiceAIServer:
             with open(cache_path, 'rb') as f:
                 return f.read()
         
-        # If not cached, generate using Gemini (one-time)
         logger.info(f"Generating audio for message: {message}")
-        agent = get_agent_config("default") # Use default friendly agent
+        agent = get_agent_config("default")
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             system_instruction=types.Content(parts=[types.Part(text=agent["system_prompt"])])
@@ -91,12 +89,10 @@ class VoiceAIServer:
         audio_data = bytearray()
         try:
             async with self.gemini_client.aio.live.connect(model=GEMINI_MODEL, config=config) as session:
-                # Ask Gemini to just say the specific message
                 await session.send_client_content(
                     turns=types.Content(role="user", parts=[types.Part(text=f"Please say exactly this and nothing else: {message}")]),
                     turn_complete=True
                 )
-                
                 async for response in session.receive():
                     if response.server_content and response.server_content.model_turn:
                         for part in response.server_content.model_turn.parts:
@@ -111,7 +107,6 @@ class VoiceAIServer:
                 return bytes(audio_data)
         except Exception as e:
             logger.error(f"Error generating cached audio: {e}")
-        
         return None
 
     def parse_params(self, path: str) -> dict:
@@ -132,77 +127,90 @@ class VoiceAIServer:
         return params
 
     async def handle_client(self, websocket, path=None):
-        # In websockets v10+, the path is in websocket.request.path
         if path is None and hasattr(websocket, 'request'):
             actual_path = websocket.request.path
         else:
             actual_path = path or "/"
             
         params = self.parse_params(actual_path)
-        logger.info(f"New {params['mode']} session from {websocket.remote_address} (path: {actual_path})")
+        logger.info(f"Persistent connection established from {websocket.remote_address}")
 
-        # Handle trigger-based audio events
+        # Session state
+        state = {
+            "mode": params["mode"],
+            "params": params,
+            "audio_queue": asyncio.Queue(),
+            "control_queue": asyncio.Queue(),
+            "active_tasks": [],
+            "gemini_session_start_time": 0,
+            "is_active": True
+        }
+
+        async def session_manager():
+            while state["is_active"]:
+                mode = state["mode"]
+                logger.info(f"Starting session mode: {mode}")
+                
+                # Cancel previous tasks if any
+                for task in state["active_tasks"]:
+                    task.cancel()
+                state["active_tasks"] = []
+
+                if mode == "chat":
+                    task = asyncio.create_task(self.run_chat_session(websocket, state))
+                    state["active_tasks"].append(task)
+                elif mode == "qa":
+                    task = asyncio.create_task(self.run_qa_session(websocket, state))
+                    state["active_tasks"].append(task)
+                elif mode == "trigger":
+                    task = asyncio.create_task(self.run_trigger_session(websocket, state))
+                    state["active_tasks"].append(task)
+                
+                # Wait for mode switch or error
+                new_mode_requested = await state["control_queue"].get()
+                if new_mode_requested == "exit":
+                    state["is_active"] = False
+                    break
+                state["mode"] = new_mode_requested
+
+        async def message_receiver():
+            try:
+                async for message in websocket:
+                    if isinstance(message, bytes):
+                        await state["audio_queue"].put(message)
+                    elif isinstance(message, str):
+                        try:
+                            data = json.loads(message)
+                            if data.get("type") == "command":
+                                cmd = data.get("command")
+                                if cmd == "switch_mode":
+                                    new_mode = data.get("mode", "chat")
+                                    # Update params
+                                    for k in state["params"]:
+                                        if k in data:
+                                            state["params"][k] = data[k]
+                                    await state["control_queue"].put(new_mode)
+                                elif cmd == "trigger":
+                                    state["params"]["trigger"] = data.get("trigger", "")
+                                    await state["control_queue"].put("trigger")
+                        except json.JSONDecodeError:
+                            logger.warning(f"Invalid JSON received: {message}")
+            except websockets.exceptions.ConnectionClosed:
+                logger.info("Client disconnected")
+            finally:
+                state["is_active"] = False
+                await state["control_queue"].put("exit")
+
+        # Start with initial trigger if present, otherwise initial mode
         if params["trigger"]:
-            await self.handle_trigger_event(websocket, params)
-            return
+            state["mode"] = "trigger"
 
-        if params["mode"] == "qa":
-            await self.handle_qa_session(websocket, params)
-        else:
-            await self.handle_chat_session(websocket, params)
+        await asyncio.gather(session_manager(), message_receiver())
 
-    async def handle_trigger_event(self, websocket, params):
-        trigger = params["trigger"]
-        logger.info(f"Handling trigger event: {trigger}")
-        
-        # Find matching messages for this trigger
-        # The CSV has 'Event' and 'Trigger' columns, let's check both
-        messages = []
-        for event, msgs in self.greetings.items():
-            if trigger.lower() in event.lower():
-                messages.extend(msgs)
-        
-        if not messages:
-            logger.warning(f"No messages found for trigger: {trigger}")
-            await websocket.send(json.dumps({"type": "error", "message": f"No audio for trigger: {trigger}"}))
-            return
-
-        # Pick a random message for variety
-        message = random.choice(messages)
-        # Personalize with child name if placeholder exists (assuming {name} or similar, 
-        # but the CSV seems to have hardcoded 'Kian'. Let's replace 'Kian' with child_name)
-        message = message.replace("Kian", params["child_name"])
-        
-        logger.info(f"Selected message: {message}")
-        
-        # Get cached audio or generate it
-        audio_data = await self._get_cached_audio(message, params["voice_profile"])
-        
-        if audio_data:
-            # Send config first so client knows what's coming
-            await websocket.send(json.dumps({
-                "type": "config",
-                "data": {
-                    "mode": "trigger",
-                    "output_sample_rate": OUTPUT_SAMPLE_RATE
-                }
-            }))
-            
-            # Stream the audio in chunks to simulate real-time
-            chunk_size = 4800 # 100ms of 24kHz 16-bit mono
-            for i in range(0, len(audio_data), chunk_size):
-                await websocket.send(audio_data[i:i+chunk_size])
-                await asyncio.sleep(0.05) # Small delay to not overwhelm
-            
-            await websocket.send(json.dumps({"type": "turn_complete"}))
-            logger.info(f"Trigger audio delivered for: {trigger}")
-        else:
-            await websocket.send(json.dumps({"type": "error", "message": "Failed to generate audio"}))
-
-    async def handle_chat_session(self, websocket, params):
+    async def run_chat_session(self, websocket, state):
+        params = state["params"]
         agent = get_agent_config(params["agent_name"])
         
-        # Send initial config to client
         await websocket.send(json.dumps({
             "type": "config",
             "data": {
@@ -214,42 +222,31 @@ class VoiceAIServer:
             }
         }))
 
-        # Gemini config
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
-            system_instruction=types.Content(
-                parts=[types.Part(text=agent["system_prompt"])]
-            )
+            system_instruction=types.Content(parts=[types.Part(text=agent["system_prompt"])])
         )
 
-        async with self.gemini_client.aio.live.connect(model=GEMINI_MODEL, config=config) as gemini_session:
-            logger.info("✅ Gemini chat session established")
+        state["gemini_session_start_time"] = time.time()
 
-            async def receive_from_client():
-                try:
-                    async for message in websocket:
-                        if isinstance(message, bytes):
-                            await gemini_session.send_realtime_input(
-                                audio=types.Blob(data=message, mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE}")
-                            )
-                        elif isinstance(message, str):
-                            data = json.loads(message)
-                            if data.get("type") == "text" and data.get("text"):
-                                await gemini_session.send_client_content(
-                                    turns=types.Content(role="user", parts=[types.Part(text=data["text"])]),
-                                    turn_complete=True
-                                )
-                except Exception as e:
-                    logger.error(f"Error receiving from client: {e}")
+        try:
+            async with self.gemini_client.aio.live.connect(model=GEMINI_MODEL, config=config) as gemini_session:
+                logger.info("✅ Gemini chat session established")
 
-            async def send_to_client():
-                try:
+                async def forward_audio():
+                    while True:
+                        audio_data = await state["audio_queue"].get()
+                        await gemini_session.send_realtime_input(
+                            audio=types.Blob(data=audio_data, mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE}")
+                        )
+
+                async def receive_gemini():
                     while True:
                         async for response in gemini_session.receive():
                             if response.server_content:
-                                model_turn = response.server_content.model_turn
-                                if model_turn and model_turn.parts:
-                                    for part in model_turn.parts:
+                                turn = response.server_content.model_turn
+                                if turn and turn.parts:
+                                    for part in turn.parts:
                                         if hasattr(part, 'inline_data') and part.inline_data:
                                             await websocket.send(part.inline_data.data)
                                         if hasattr(part, 'text') and part.text:
@@ -258,41 +255,37 @@ class VoiceAIServer:
                                                 "role": "assistant",
                                                 "text": part.text
                                             }))
-                                
                                 if response.server_content.turn_complete:
                                     await websocket.send(json.dumps({"type": "turn_complete"}))
-                            
-                            if response.tool_call:
-                                pass # Handle tool calls if needed
                         await asyncio.sleep(0.01)
-                except Exception as e:
-                    logger.error(f"Error sending to client: {e}")
 
-            await asyncio.gather(receive_from_client(), send_to_client())
+                async def check_timeout():
+                    while True:
+                        await asyncio.sleep(10)
+                        if time.time() - state["gemini_session_start_time"] > SESSION_TIMEOUT_SECONDS:
+                            logger.info("Chat session timeout reached. Re-initiating...")
+                            await state["control_queue"].put("chat")
+                            return
 
-    async def handle_qa_session(self, websocket, params):
+                await asyncio.gather(forward_audio(), receive_gemini(), check_timeout())
+        except asyncio.CancelledError:
+            logger.info("Chat session task cancelled")
+        except Exception as e:
+            logger.error(f"Chat session error: {e}")
+
+    async def run_qa_session(self, websocket, state):
+        params = state["params"]
         story = get_story(params["story_id"])
         chapter = story.get_chapter(params["chapter_id"]) if story else None
         
         if not story or not chapter:
-            await websocket.send(json.dumps({"type": "error", "message": "Story or Chapter not found"}))
+            await websocket.send(json.dumps({"type": "error", "message": "Story/Chapter not found"}))
             return
 
-        qa_session = QASession(
-            session_id=f"qa_{id(websocket)}",
-            story_id=params["story_id"],
-            current_chapter_id=params["chapter_id"]
-        )
-        
+        qa_session = QASession(session_id=f"qa_{id(websocket)}", story_id=params["story_id"], current_chapter_id=params["chapter_id"])
         questions = chapter.questions
-        state = {
-            "current_question_idx": 0,
-            "waiting_for_answer": False,
-            "question_being_asked": False,
-            "audio_sent_this_turn": False
-        }
+        qa_state = {"idx": 0, "waiting": False, "asking": False, "audio_sent": False}
 
-        # Send initial config
         await websocket.send(json.dumps({
             "type": "config",
             "data": {
@@ -313,62 +306,33 @@ class VoiceAIServer:
             system_instruction=types.Content(parts=[types.Part(text=system_instruction)])
         )
 
-        async with self.gemini_client.aio.live.connect(model=GEMINI_MODEL, config=config) as gemini_session:
-            logger.info("✅ Gemini Q&A session established")
+        try:
+            async with self.gemini_client.aio.live.connect(model=GEMINI_MODEL, config=config) as gemini_session:
+                logger.info("✅ Gemini Q&A session established")
 
-            async def ask_question(idx):
-                if idx < len(questions):
-                    q = questions[idx]
-                    if idx == 0:
-                        # For the first question, include a brief summary intro
-                        prompt = f"Briefly summarize the chapter in 1-2 friendly sentences for {params['child_name']}, then ask Question 1: \"{q.question_text}\". The expected answer is \"{q.expected_answers[0]}\"."
-                    else:
-                        prompt = f"Question {idx+1}: Ask the child: \"{q.question_text}\". The expected answer is \"{q.expected_answers[0]}\". Just ask the question clearly."
-                    
-                    state["question_being_asked"] = True
-                    state["audio_sent_this_turn"] = False
-                    await gemini_session.send_client_content(
-                        turns=types.Content(role="user", parts=[types.Part(text=prompt)]),
-                        turn_complete=True
-                    )
+                async def ask_question(idx):
+                    if idx < len(questions):
+                        q = questions[idx]
+                        if idx == 0:
+                            prompt = f"Briefly summarize the chapter in 1-2 friendly sentences for {params['child_name']}, then ask Question 1: \"{q.question_text}\". Expected answer: \"{q.expected_answers[0]}\"."
+                        else:
+                            prompt = f"Question {idx+1}: Ask: \"{q.question_text}\". Expected: \"{q.expected_answers[0]}\"."
+                        
+                        qa_state.update({"asking": True, "audio_sent": False})
+                        await gemini_session.send_client_content(
+                            turns=types.Content(role="user", parts=[types.Part(text=prompt)]),
+                            turn_complete=True
+                        )
 
-            async def evaluate_answer(user_answer):
-                q = questions[state["current_question_idx"]]
-                is_correct = q.check_answer(user_answer)
-                qa_session.record_answer(q, user_answer, is_correct)
-                
-                if is_correct:
-                    feedback = "That's correct! Great job!"
-                else:
-                    feedback = f"Actually, the answer is {q.expected_answers[0]}. Let's try the next one!"
-                
-                await gemini_session.send_client_content(
-                    turns=types.Content(role="user", parts=[types.Part(text=f"The child answered: \"{user_answer}\". This is {'correct' if is_correct else 'incorrect'}. {feedback}")]),
-                    turn_complete=True
-                )
+                async def forward_audio():
+                    while True:
+                        audio_data = await state["audio_queue"].get()
+                        await gemini_session.send_realtime_input(
+                            audio=types.Blob(data=audio_data, mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE}")
+                        )
 
-            async def receive_from_client():
-                try:
-                    async for message in websocket:
-                        if isinstance(message, bytes):
-                            await gemini_session.send_realtime_input(
-                                audio=types.Blob(data=message, mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE}")
-                            )
-                        elif isinstance(message, str):
-                            data = json.loads(message)
-                            if data.get("type") == "text" and data.get("text"):
-                                await gemini_session.send_client_content(
-                                    turns=types.Content(role="user", parts=[types.Part(text=data["text"])]),
-                                    turn_complete=True
-                                )
-                except Exception as e:
-                    logger.error(f"QA Receive Error: {e}")
-
-            async def send_to_client():
-                try:
-                    # Ask first question immediately after connection
+                async def receive_gemini():
                     await ask_question(0)
-
                     while True:
                         async for response in gemini_session.receive():
                             if response.server_content:
@@ -376,43 +340,66 @@ class VoiceAIServer:
                                 if turn and turn.parts:
                                     for part in turn.parts:
                                         if hasattr(part, 'inline_data') and part.inline_data:
-                                            state["audio_sent_this_turn"] = True
+                                            qa_state["audio_sent"] = True
                                             await websocket.send(part.inline_data.data)
                                         if hasattr(part, 'text') and part.text:
                                             await websocket.send(json.dumps({"type": "transcript", "text": part.text}))
 
                                 if response.server_content.turn_complete:
-                                    if state["question_being_asked"] and state["audio_sent_this_turn"]:
-                                        state["question_being_asked"] = False
-                                        state["waiting_for_answer"] = True
+                                    if qa_state["asking"] and qa_state["audio_sent"]:
+                                        qa_state.update({"asking": False, "waiting": True})
                                         await websocket.send(json.dumps({"type": "turn_complete"}))
-                                        logger.info(f"Question {state['current_question_idx']+1} spoken to client")
-                                    
-                                    elif state["waiting_for_answer"] and state["audio_sent_this_turn"]:
-                                        # This was the feedback turn
-                                        state["waiting_for_answer"] = False
-                                        state["current_question_idx"] += 1
-                                        
-                                        if state["current_question_idx"] < len(questions):
-                                            # Reduced delay between feedback and next question
-                                            await asyncio.sleep(0.05)
-                                            await ask_question(state["current_question_idx"])
+                                    elif qa_state["waiting"] and qa_state["audio_sent"]:
+                                        qa_state.update({"waiting": False, "idx": qa_state["idx"] + 1})
+                                        if qa_state["idx"] < len(questions):
+                                            await asyncio.sleep(0.1)
+                                            await ask_question(qa_state["idx"])
                                         else:
-                                            # End of session
                                             await websocket.send(json.dumps({"type": "turn_complete"}))
                                             praise = qa_session.get_praise_message()
                                             await gemini_session.send_client_content(
-                                                turns=types.Content(role="user", parts=[types.Part(text=f"The Q&A is over. {praise}")]),
+                                                turns=types.Content(role="user", parts=[types.Part(text=f"Q&A over. {praise}")]),
                                                 turn_complete=True
                                             )
                                             await websocket.send(json.dumps({"type": "qa_complete", "score": qa_session.score}))
                                             return
-
                         await asyncio.sleep(0.01)
-                except Exception as e:
-                    logger.error(f"QA Send Error: {e}")
 
-            await asyncio.gather(receive_from_client(), send_to_client())
+                await asyncio.gather(forward_audio(), receive_gemini())
+        except asyncio.CancelledError:
+            logger.info("QA session task cancelled")
+        except Exception as e:
+            logger.error(f"QA session error: {e}")
+
+    async def run_trigger_session(self, websocket, state):
+        params = state["params"]
+        trigger = params.get("trigger", "")
+        logger.info(f"Triggering audio: {trigger}")
+        
+        messages = []
+        for event, msgs in self.greetings.items():
+            if trigger.lower() in event.lower():
+                messages.extend(msgs)
+        
+        if not messages:
+            await websocket.send(json.dumps({"type": "error", "message": f"No audio for {trigger}"}))
+            await state["control_queue"].put("chat") # Revert to chat
+            return
+
+        message = random.choice(messages).replace("Kian", params["child_name"])
+        audio_data = await self._get_cached_audio(message, params["voice_profile"])
+        
+        if audio_data:
+            await websocket.send(json.dumps({"type": "config", "data": {"mode": "trigger", "output_sample_rate": OUTPUT_SAMPLE_RATE}}))
+            chunk_size = 4800
+            for i in range(0, len(audio_data), chunk_size):
+                await websocket.send(audio_data[i:i+chunk_size])
+                await asyncio.sleep(0.05)
+            await websocket.send(json.dumps({"type": "turn_complete"}))
+            logger.info(f"Trigger {trigger} finished")
+        
+        # After trigger, automatically go to chat mode
+        await state["control_queue"].put("chat")
 
     async def start(self):
         logger.info(f"Server starting on ws://{self.host}:{self.port}")
@@ -425,3 +412,6 @@ if __name__ == "__main__":
         asyncio.run(server.start())
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        logger.error(f"FATAL: {e}")
+        sys.exit(1)
