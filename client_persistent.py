@@ -16,7 +16,8 @@ from urllib.parse import urlencode
 # Audio Constants
 IN_RATE, OUT_RATE = 16000, 24000
 CHANNELS, WIDTH = 1, 2
-IN_CHUNK, OUT_CHUNK = 1600, 2400
+IN_CHUNK = 512   # 32ms at 16kHz
+OUT_CHUNK = 768  # 32ms at 24kHz
 
 class PersistentClient:
     def __init__(self, url, child_name="Kian"):
@@ -132,6 +133,6 @@ class PersistentClient:
             self.audio.terminate()
 
 if __name__ == "__main__":
-    client = PersistentClient("ws://localhost:8765")
+    client = PersistentClient("wss://voice-ai-pers-388996421538.asia-south1.run.app")
     asyncio.run(client.connect())
 

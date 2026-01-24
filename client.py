@@ -16,13 +16,13 @@ from typing import Optional
 
 # Audio configuration - Input (microphone)
 INPUT_SAMPLE_RATE = 16000
-INPUT_CHUNK_SIZE = 4096  # ~256ms chunks at 16kHz
+INPUT_CHUNK_SIZE = 512  # 32ms at 16kHz
 INPUT_CHANNELS = 1
 INPUT_FORMAT = pyaudio.paInt16
 
 # Audio configuration - Output (speaker) - Gemini outputs 24kHz
 OUTPUT_SAMPLE_RATE = 24000
-OUTPUT_CHUNK_SIZE = 6144  # ~256ms chunks at 24kHz
+OUTPUT_CHUNK_SIZE = 768  # 32ms at 24kHz
 OUTPUT_CHANNELS = 1
 OUTPUT_FORMAT = pyaudio.paInt16
 

@@ -43,7 +43,7 @@ GEMINI_MODEL = "models/gemini-2.5-flash-native-audio-latest"
 # Configuration
 GREETINGS_FILE = "Questions - Greetings.csv"
 GREETINGS_CACHE_DIR = "audio_cache"
-SESSION_TIMEOUT_SECONDS = 30  # 3 minutes
+SESSION_TIMEOUT_SECONDS = 120  # 3 minutes
 
 class VoiceAIServer:
     def __init__(self, host: str = "0.0.0.0", port: int = 8765):
@@ -260,7 +260,11 @@ class VoiceAIServer:
                                     state["last_activity_time"] = time.time()
                                     for part in turn.parts:
                                         if hasattr(part, 'inline_data') and part.inline_data:
-                                            await websocket.send(part.inline_data.data)
+                                            # Send in 32ms chunks (1536 bytes) to avoid device buffer overflow
+                                            live_data = part.inline_data.data
+                                            live_chunk_size = 1536
+                                            for j in range(0, len(live_data), live_chunk_size):
+                                                await websocket.send(live_data[j:j+live_chunk_size])
                                         if hasattr(part, 'text') and part.text:
                                             await websocket.send(json.dumps({
                                                 "type": "transcript",
@@ -364,7 +368,11 @@ class VoiceAIServer:
                                     for part in turn.parts:
                                         if hasattr(part, 'inline_data') and part.inline_data:
                                             qa_state["audio_sent"] = True
-                                            await websocket.send(part.inline_data.data)
+                                            # Send in 32ms chunks (1536 bytes)
+                                            live_data = part.inline_data.data
+                                            live_chunk_size = 1536
+                                            for j in range(0, len(live_data), live_chunk_size):
+                                                await websocket.send(live_data[j:j+live_chunk_size])
                                         if hasattr(part, 'text') and part.text:
                                             await websocket.send(json.dumps({"type": "transcript", "text": part.text}))
 
@@ -414,10 +422,13 @@ class VoiceAIServer:
         
         if audio_data:
             await websocket.send(json.dumps({"type": "config", "data": {"mode": "trigger", "output_sample_rate": OUTPUT_SAMPLE_RATE}}))
-            chunk_size = 4800
+            
+            # Stream in 32ms chunks (768 samples * 2 bytes = 1536 bytes)
+            chunk_size = 1536
             for i in range(0, len(audio_data), chunk_size):
                 await websocket.send(audio_data[i:i+chunk_size])
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.032) # Match 32ms real-time duration
+            
             await websocket.send(json.dumps({"type": "turn_complete"}))
             logger.info(f"Trigger {trigger} finished")
         
