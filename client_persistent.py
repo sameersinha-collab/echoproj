@@ -57,6 +57,11 @@ class PersistentClient:
 
     async def send_command(self, cmd_data):
         if self.ws:
+            # If switching to chat, assume AI will speak first and mute mic
+            if cmd_data.get("command") == "switch_mode" and cmd_data.get("mode") == "chat":
+                self.is_ai_speaking = True
+                print("🔇 Switching to Chat (mic muted for greeting)...")
+            
             await self.ws.send(json.dumps({"type": "command", **cmd_data}))
             print(f"➡️ Command sent: {cmd_data.get('command')} ({cmd_data.get('mode', cmd_data.get('trigger'))})")
 
@@ -102,7 +107,11 @@ class PersistentClient:
                         data = json.loads(msg)
                         m_type = data.get("type")
                         if m_type == "config":
-                            print(f"\n📋 Mode: {data['data'].get('mode')} (Config received)")
+                            mode = data['data'].get('mode')
+                            print(f"\n📋 Mode: {mode} (Config received)")
+                            if mode == "idle":
+                                self.is_ai_speaking = False
+                                print("💤 System is IDLE. Choose an option to start.")
                         elif m_type == "transcript":
                             print(f"   💬 \"{data.get('text')}\"")
                         elif m_type == "turn_complete":
@@ -123,6 +132,6 @@ class PersistentClient:
             self.audio.terminate()
 
 if __name__ == "__main__":
-    client = PersistentClient("wss://voice-ai-pers-388996421538.asia-south1.run.app")
+    client = PersistentClient("ws://localhost:8765")
     asyncio.run(client.connect())
 

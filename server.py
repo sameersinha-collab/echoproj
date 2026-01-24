@@ -43,7 +43,7 @@ GEMINI_MODEL = "models/gemini-2.5-flash-native-audio-latest"
 # Configuration
 GREETINGS_FILE = "Questions - Greetings.csv"
 GREETINGS_CACHE_DIR = "audio_cache"
-SESSION_TIMEOUT_SECONDS = 180  # 3 minutes
+SESSION_TIMEOUT_SECONDS = 30  # 3 minutes
 
 class VoiceAIServer:
     def __init__(self, host: str = "0.0.0.0", port: int = 8765):
@@ -142,7 +142,7 @@ class VoiceAIServer:
             "audio_queue": asyncio.Queue(),
             "control_queue": asyncio.Queue(),
             "active_tasks": [],
-            "gemini_session_start_time": 0,
+            "last_activity_time": time.time(),
             "is_active": True
         }
 
@@ -165,6 +165,9 @@ class VoiceAIServer:
                 elif mode == "trigger":
                     task = asyncio.create_task(self.run_trigger_session(websocket, state))
                     state["active_tasks"].append(task)
+                elif mode == "idle":
+                    await websocket.send(json.dumps({"type": "config", "data": {"mode": "idle"}}))
+                    logger.info("Server is now IDLE, waiting for command")
                 
                 # Wait for mode switch or error
                 new_mode_requested = await state["control_queue"].get()
@@ -211,6 +214,9 @@ class VoiceAIServer:
         params = state["params"]
         agent = get_agent_config(params["agent_name"])
         
+        # Reset activity timer
+        state["last_activity_time"] = time.time()
+        
         await websocket.send(json.dumps({
             "type": "config",
             "data": {
@@ -227,8 +233,6 @@ class VoiceAIServer:
             system_instruction=types.Content(parts=[types.Part(text=agent["system_prompt"])])
         )
 
-        state["gemini_session_start_time"] = time.time()
-
         try:
             async with self.gemini_client.aio.live.connect(model=GEMINI_MODEL, config=config) as gemini_session:
                 logger.info("✅ Gemini chat session established")
@@ -236,16 +240,24 @@ class VoiceAIServer:
                 async def forward_audio():
                     while True:
                         audio_data = await state["audio_queue"].get()
+                        # We removed last_activity_time reset here so silence doesn't keep session alive
                         await gemini_session.send_realtime_input(
                             audio=types.Blob(data=audio_data, mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE}")
                         )
 
                 async def receive_gemini():
+                    # Send an initial hidden prompt to trigger a greeting
+                    await gemini_session.send_client_content(
+                        turns=types.Content(role="user", parts=[types.Part(text=f"Hi Wippi! I am {params['child_name']}. Please give me a very brief, friendly greeting to start our chat!")]),
+                        turn_complete=True
+                    )
                     while True:
                         async for response in gemini_session.receive():
                             if response.server_content:
                                 turn = response.server_content.model_turn
                                 if turn and turn.parts:
+                                    # Reset timer only when Gemini speaks or sends text
+                                    state["last_activity_time"] = time.time()
                                     for part in turn.parts:
                                         if hasattr(part, 'inline_data') and part.inline_data:
                                             await websocket.send(part.inline_data.data)
@@ -261,13 +273,24 @@ class VoiceAIServer:
 
                 async def check_timeout():
                     while True:
-                        await asyncio.sleep(10)
-                        if time.time() - state["gemini_session_start_time"] > SESSION_TIMEOUT_SECONDS:
-                            logger.info("Chat session timeout reached. Re-initiating...")
-                            await state["control_queue"].put("chat")
+                        await asyncio.sleep(2) # Check every 2 seconds
+                        elapsed = time.time() - state["last_activity_time"]
+                        if elapsed > SESSION_TIMEOUT_SECONDS:
+                            logger.info(f"Chat session inactivity timeout ({elapsed:.1f}s). Returning to IDLE...")
+                            await state["control_queue"].put("idle")
                             return
 
-                await asyncio.gather(forward_audio(), receive_gemini(), check_timeout())
+                # Use wait instead of gather so we exit as soon as check_timeout returns
+                done, pending = await asyncio.wait(
+                    [
+                        asyncio.create_task(forward_audio()), 
+                        asyncio.create_task(receive_gemini()), 
+                        asyncio.create_task(check_timeout())
+                    ],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in pending:
+                    task.cancel()
         except asyncio.CancelledError:
             logger.info("Chat session task cancelled")
         except Exception as e:
@@ -398,8 +421,8 @@ class VoiceAIServer:
             await websocket.send(json.dumps({"type": "turn_complete"}))
             logger.info(f"Trigger {trigger} finished")
         
-        # After trigger, automatically go to chat mode
-        await state["control_queue"].put("chat")
+        # After trigger, automatically go to idle mode (not chat)
+        await state["control_queue"].put("idle")
 
     async def start(self):
         logger.info(f"Server starting on ws://{self.host}:{self.port}")
