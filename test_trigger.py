@@ -12,7 +12,7 @@ from urllib.parse import urlencode
 # Audio Constants
 OUTPUT_SAMPLE_RATE = 24000
 CHANNELS = 1
-OUTPUT_CHUNK = 768 # 32ms at 24kHz
+OUTPUT_CHUNK = 2400
 
 async def test_trigger(trigger_name, child_name="Kian"):
     params = {

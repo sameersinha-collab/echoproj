@@ -17,8 +17,8 @@ INPUT_SAMPLE_RATE = 16000
 OUTPUT_SAMPLE_RATE = 24000
 CHANNELS = 1
 SAMPLE_WIDTH = 2
-INPUT_CHUNK = 512   # 32ms at 16kHz
-OUTPUT_CHUNK = 768  # 32ms at 24kHz
+INPUT_CHUNK = 1600
+OUTPUT_CHUNK = 2400
 
 class QATestClient:
     def __init__(self, server_url, story_id, chapter_id, child_name):

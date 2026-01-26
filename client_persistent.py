@@ -16,8 +16,7 @@ from urllib.parse import urlencode
 # Audio Constants
 IN_RATE, OUT_RATE = 16000, 24000
 CHANNELS, WIDTH = 1, 2
-IN_CHUNK = 512   # 32ms at 16kHz
-OUT_CHUNK = 768  # 32ms at 24kHz
+IN_CHUNK, OUT_CHUNK = 1600, 2400
 
 class PersistentClient:
     def __init__(self, url, child_name="Kian"):
