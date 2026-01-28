@@ -305,24 +305,56 @@ class VoiceAIServer:
             await websocket.send(json.dumps({"type": "error", "message": "Story/Chapter not found"}))
             return
 
-        qa_session = QASession(session_id=f"qa_{id(websocket)}", story_id=params["story_id"], current_chapter_id=params["chapter_id"])
-        questions = chapter.questions
-        qa_state = {"idx": 0, "waiting": False, "asking": False, "audio_sent": False}
+        qa_state = {"questions_asked": 0, "waiting_for_answer": False, "is_closing": False}
 
         await websocket.send(json.dumps({
             "type": "config",
             "data": {
                 "mode": "qa",
                 "chapter_name": chapter.chapter_name,
-                "total_questions": len(questions),
+                "total_questions": 4,
                 "input_sample_rate": INPUT_SAMPLE_RATE,
                 "output_sample_rate": OUTPUT_SAMPLE_RATE
             }
         }))
 
         agent = get_agent_config("story_qa")
-        summary = chapter.summary if hasattr(chapter, 'summary') else ""
-        system_instruction = f"{agent['system_prompt']}\n\nSTORY: {story.story_name}\nCHAPTER: {chapter.chapter_name}\nSUMMARY: {summary}\nCHILD NAME: {params['child_name']}"
+        story_summary = story.story_summary if hasattr(story, 'story_summary') else ""
+        chapter_summary = chapter.summary if hasattr(chapter, 'summary') else ""
+        
+        # Override character and voice based on story
+        character_name = getattr(story, 'character_name', "the story character")
+        voice_profile_key = getattr(story, 'voice_profile', params['voice_profile'])
+        
+        # Get voice profile details
+        from agents import get_voice_profile
+        v_profile = get_voice_profile(voice_profile_key)
+        voice_description = v_profile.get("description", voice_profile_key)
+        tone_instruction = v_profile.get("tone_instruction", "")
+        
+        # Get past chapters summaries for context
+        past_summaries = []
+        try:
+            chapter_ids = list(story.chapters.keys())
+            current_idx = chapter_ids.index(params["chapter_id"])
+            for i in range(current_idx):
+                past_ch = story.chapters[chapter_ids[i]]
+                if past_ch.summary:
+                    past_summaries.append(f"Chapter {past_ch.chapter_id} ({past_ch.chapter_name}): {past_ch.summary}")
+        except Exception as e:
+            logger.warning(f"Error getting past summaries: {e}")
+            
+        combined_chapter_context = ""
+        if past_summaries:
+            combined_chapter_context += "PAST CHAPTERS:\n" + "\n".join(past_summaries) + "\n\n"
+        combined_chapter_context += f"CURRENT CHAPTER ({chapter.chapter_name}):\n{chapter_summary}"
+
+        system_instruction = agent['system_prompt']
+        system_instruction = system_instruction.replace("the story's main character", character_name)
+        system_instruction = system_instruction.replace("[Overall Story Summary]", story_summary)
+        system_instruction = system_instruction.replace("[Current Chapter Summary]", combined_chapter_context)
+        system_instruction = system_instruction.replace("[Voice Profile]", f"{voice_description}\nTONE INSTRUCTION: {tone_instruction}")
+        system_instruction = system_instruction.replace("[Kid Name]", params['child_name'])
         
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
@@ -333,20 +365,6 @@ class VoiceAIServer:
             async with self.gemini_client.aio.live.connect(model=GEMINI_MODEL, config=config) as gemini_session:
                 logger.info("✅ Gemini Q&A session established")
 
-                async def ask_question(idx):
-                    if idx < len(questions):
-                        q = questions[idx]
-                        if idx == 0:
-                            prompt = f"Briefly summarize the chapter in 1-2 friendly sentences for {params['child_name']}, then ask Question 1: \"{q.question_text}\". Expected answer: \"{q.expected_answers[0]}\"."
-                        else:
-                            prompt = f"Question {idx+1}: Ask: \"{q.question_text}\". Expected: \"{q.expected_answers[0]}\"."
-                        
-                        qa_state.update({"asking": True, "audio_sent": False})
-                        await gemini_session.send_client_content(
-                            turns=types.Content(role="user", parts=[types.Part(text=prompt)]),
-                            turn_complete=True
-                        )
-
                 async def forward_audio():
                     while True:
                         audio_data = await state["audio_queue"].get()
@@ -355,7 +373,13 @@ class VoiceAIServer:
                         )
 
                 async def receive_gemini():
-                    await ask_question(0)
+                    # Initial prompt to start the 4-question flow
+                    initial_prompt = f"Hi! I'm so glad we finished this chapter. Let's talk about it! (Start by asking the first question: Cognitive goal)"
+                    await gemini_session.send_client_content(
+                        turns=types.Content(role="user", parts=[types.Part(text=initial_prompt)]),
+                        turn_complete=True
+                    )
+                    
                     while True:
                         async for response in gemini_session.receive():
                             if response.server_content:
@@ -363,29 +387,18 @@ class VoiceAIServer:
                                 if turn and turn.parts:
                                     for part in turn.parts:
                                         if hasattr(part, 'inline_data') and part.inline_data:
-                                            qa_state["audio_sent"] = True
                                             await websocket.send(part.inline_data.data)
                                         if hasattr(part, 'text') and part.text:
                                             await websocket.send(json.dumps({"type": "transcript", "text": part.text}))
+                                            if "let’s start the next chapter" in part.text.lower() or "let's start the next chapter" in part.text.lower():
+                                                qa_state["is_closing"] = True
 
                                 if response.server_content.turn_complete:
-                                    if qa_state["asking"] and qa_state["audio_sent"]:
-                                        qa_state.update({"asking": False, "waiting": True})
-                                        await websocket.send(json.dumps({"type": "turn_complete"}))
-                                    elif qa_state["waiting"] and qa_state["audio_sent"]:
-                                        qa_state.update({"waiting": False, "idx": qa_state["idx"] + 1})
-                                        if qa_state["idx"] < len(questions):
-                                            await asyncio.sleep(0.1)
-                                            await ask_question(qa_state["idx"])
-                                        else:
-                                            await websocket.send(json.dumps({"type": "turn_complete"}))
-                                            praise = qa_session.get_praise_message()
-                                            await gemini_session.send_client_content(
-                                                turns=types.Content(role="user", parts=[types.Part(text=f"Q&A over. {praise}")]),
-                                                turn_complete=True
-                                            )
-                                            await websocket.send(json.dumps({"type": "qa_complete", "score": qa_session.score}))
-                                            return
+                                    await websocket.send(json.dumps({"type": "turn_complete"}))
+                                    if qa_state["is_closing"]:
+                                        await websocket.send(json.dumps({"type": "qa_complete", "score": 100}))
+                                        await state["control_queue"].put("idle")
+                                        return
                         await asyncio.sleep(0.01)
 
                 await asyncio.gather(forward_audio(), receive_gemini())

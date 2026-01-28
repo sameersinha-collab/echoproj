@@ -55,6 +55,9 @@ class Story:
     """A complete story with all chapters."""
     story_id: str
     story_name: str
+    story_summary: str = ""  # Overall summary for AI context
+    character_name: str = "Wippi"  # The character who asks questions
+    voice_profile: str = "indian_female"  # The voice for this story's Q&A
     chapters: Dict[str, Chapter] = field(default_factory=dict)
     
     def get_chapter(self, chapter_id: str) -> Optional[Chapter]:
@@ -90,6 +93,11 @@ class Story:
 CINDERELLA_STORY = Story(
     story_id="cinderella",
     story_name="Cinderella",
+    story_summary="""Cinderella is a kind and hopeful girl who is mistreated by her stepmother and stepsisters. 
+With the help of her animal friends and a Fairy Godmother, she attends a royal ball, meets Prince Leo, 
+and eventually finds happiness when the glass slipper fits her foot perfectly.""",
+    character_name="Cinderella",
+    voice_profile="sulafat",
     chapters={
         "1": Chapter(
             chapter_id="1",

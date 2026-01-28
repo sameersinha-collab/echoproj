@@ -132,6 +132,6 @@ class PersistentClient:
             self.audio.terminate()
 
 if __name__ == "__main__":
-    client = PersistentClient("wss://voice-ai-pers-388996421538.asia-south1.run.app")
+    client = PersistentClient("ws://localhost:8765")
     asyncio.run(client.connect())
 
