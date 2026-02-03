@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, urlparse
 from google import genai
 from google.genai import types
 
-from agents import get_agent_config, DEFAULT_AGENT, DEFAULT_VOICE_PROFILE
+from agents import get_agent_config, DEFAULT_AGENT, DEFAULT_VOICE_PROFILE, QA_GOALS, METADATA_FILTER_KEYWORDS, get_qa_initial_prompt
 from story_data import get_story, QASession
 
 # Configure logging
@@ -308,7 +308,14 @@ class VoiceAIServer:
         # Configuration
         QA_TIMEOUT_SECONDS = 35
 
-        qa_state = {"questions_asked": 0, "waiting_for_answer": False, "is_closing": False, "last_activity": time.time()}
+        qa_state = {
+            "question_index": 0, 
+            "is_closing": False, 
+            "last_activity": time.time(),
+            "attempts": 0,
+            "waiting_for_answer": True,
+            "turn_count": 0
+        }
 
         await websocket.send(json.dumps({
             "type": "config",
@@ -353,10 +360,7 @@ class VoiceAIServer:
         combined_chapter_context += f"CURRENT CHAPTER ({chapter.chapter_name}):\n{chapter_summary}"
 
         system_instruction = agent['system_prompt']
-        system_instruction = system_instruction.replace("the story's main character", character_name)
-        system_instruction = system_instruction.replace("[Overall Story Summary]", story_summary)
-        system_instruction = system_instruction.replace("[Current Chapter Summary]", combined_chapter_context)
-        system_instruction = system_instruction.replace("[Voice Profile]", f"{voice_description}\nTONE INSTRUCTION: {tone_instruction}")
+        system_instruction = system_instruction.replace("[Character Name]", character_name)
         system_instruction = system_instruction.replace("[Kid Name]", params['child_name'])
         
         config = types.LiveConnectConfig(
@@ -372,7 +376,6 @@ class VoiceAIServer:
                     while True:
                         try:
                             audio_data = await state["audio_queue"].get()
-                            # Only forward audio if not already in closing phase
                             if qa_state["is_closing"]:
                                 return
                             await gemini_session.send_realtime_input(
@@ -384,8 +387,18 @@ class VoiceAIServer:
 
                 async def receive_gemini():
                     try:
-                        # Initial prompt to start the 4-question flow with better transition
-                        initial_prompt = f"That was such a wonderful part of the story! I'm still thinking about everything that happened. (Start by asking the first question: Cognitive goal)"
+                        # Initial prompt to start the session
+                        is_last_chapter = story.is_last_chapter(params["chapter_id"])
+                        
+                        initial_prompt = get_qa_initial_prompt(
+                            child_name=params['child_name'],
+                            character_name=character_name,
+                            story_name=story.story_name,
+                            story_summary=story_summary,
+                            combined_chapter_context=combined_chapter_context,
+                            first_goal_focus=QA_GOALS[0]['focus']
+                        )
+                        
                         await gemini_session.send_client_content(
                             turns=types.Content(role="user", parts=[types.Part(text=initial_prompt)]),
                             turn_complete=True
@@ -396,58 +409,90 @@ class VoiceAIServer:
                                 if response.server_content:
                                     turn = response.server_content.model_turn
                                     if turn and turn.parts:
-                                        # Reset timeout on AI activity
                                         qa_state["last_activity"] = time.time()
+                                        qa_state["turn_count"] += 1
+                                        turn_text = ""
                                         for part in turn.parts:
                                             if hasattr(part, 'inline_data') and part.inline_data:
                                                 await websocket.send(part.inline_data.data)
                                             if hasattr(part, 'text') and part.text:
-                                                await websocket.send(json.dumps({"type": "transcript", "text": part.text}))
-                                                # More robust detection of the closing phase
-                                                text_lower = part.text.lower()
-                                                if any(phrase in text_lower for phrase in [
-                                                    "next chapter", 
-                                                    "see you when it", 
-                                                    "i'm ready for more", 
-                                                    "that was so much fun",
-                                                    "see you when it’s done",
-                                                    "see you when it's done"
-                                                ]):
-                                                    qa_state["is_closing"] = True
+                                                content = part.text.strip()
+                                                turn_text += " " + content
+                                                logger.info(f"RECEIVED TEXT: '{content}'")
+                                                # Filter metadata
+                                                content_lower = content.lower()
+                                                metadata_keywords = METADATA_FILTER_KEYWORDS
+                                                
+                                                if content.startswith("**") or content.startswith("(") or any(x in content_lower for x in metadata_keywords):
+                                                    logger.info(f"FILTERED METADATA: '{content[:100]}...'")
+                                                    continue
+                                                
+                                                await websocket.send(json.dumps({"type": "transcript", "text": content}))
+                                        
+                                        # Only check completion logic on the FULL accumulated turn text or significantly large chunks
+                                        # Also SKIP monitoring on the FIRST turn to reduce latency and resource usage
+                                        if turn_text.strip() and qa_state["turn_count"] > 1:
+                                            full_text = turn_text.strip()
+                                            
+                                            # Parallel LLM call to monitor session completion
+                                            async def monitor_session(text):
+                                                try:
+                                                    monitor_prompt = (
+                                                        "Analyze this dialogue from a story character to a child. "
+                                                        "Has the character finished all 4 questions and is now saying goodbye or concluding the session? "
+                                                        "Look for phrases like 'That was so much fun', 'I'm ready for more', 'See you next time', or any final farewell. "
+                                                        "Answer ONLY 'YES' or 'NO'.\n\n"
+                                                        f"Dialogue: \"{text}\""
+                                                    )
+                                                    response = await self.gemini_client.aio.models.generate_content(
+                                                        model="gemini-2.0-flash",
+                                                        contents=monitor_prompt
+                                                    )
+                                                    decision = response.text.strip().upper()
+                                                    logger.info(f"MONITOR DECISION: '{decision}' for text: '{text[:50]}...'")
+                                                    if "YES" in decision:
+                                                        logger.info(f"✅ Monitor detected session completion. Setting is_closing=True")
+                                                        qa_state["is_closing"] = True
+                                                except Exception as e:
+                                                    logger.error(f"Error in monitor_session: {e}")
+
+                                            asyncio.create_task(monitor_session(full_text))
+
+                                            if any(phrase in full_text.lower() for phrase in ["let’s start the next chapter", "let's start the next chapter", "see you when it’s done", "see you when it's done", "that was so much fun"]):
+                                                logger.info(f"✅ Keyword match detected for closing. Setting is_closing=True")
+                                                qa_state["is_closing"] = True
+                                                # Optional: If we found the closing phrase, we can stop processing further text parts to avoid delay from long thought generations
+                                                # But we must continue the loop to let the 'turn_complete' signal pass through.
 
                                     if response.server_content.turn_complete:
-                                        await websocket.send(json.dumps({"type": "turn_complete"}))
-                                        # Ensure we only exit after the closing phrase has been sent
                                         if qa_state["is_closing"]:
-                                            logger.info("QA session finished naturally via closing phrase")
+                                            logger.info("🏁 Session closing detected. Sending qa_complete and exiting receive_gemini.")
                                             await websocket.send(json.dumps({"type": "qa_complete", "score": 100}))
                                             return
+
+                                        await websocket.send(json.dumps({"type": "turn_complete"}))
+                                            
+                                        # The model finished a turn. If it didn't ask a question or got distracted,
+                                        # the next time the child speaks, the model's instructions (in initial_prompt)
+                                        # should guide it to pivot back.
+                                            
                             await asyncio.sleep(0.01)
-                    except websockets.exceptions.ConnectionClosed:
-                        logger.info("Websocket closed in receive_gemini")
-                        return
                     except Exception as e:
                         logger.error(f"Error in receive_gemini: {e}")
-                        return
 
                 async def check_qa_timeout():
                     while True:
                         await asyncio.sleep(2)
                         elapsed = time.time() - qa_state["last_activity"]
-                        # Timeout only if NO activity (AI hasn't spoken)
                         if elapsed > QA_TIMEOUT_SECONDS and not qa_state["is_closing"]:
-                            logger.info(f"QA session timeout ({elapsed:.1f}s). Sending timeout message and returning to IDLE...")
-                            # Send a final message before switching
                             timeout_msg = "It looks like you're busy! Let’s start the next chapter and I'll see you when it’s done!"
                             await gemini_session.send_client_content(
-                                turns=types.Content(role="user", parts=[types.Part(text=f"The child hasn't responded for a while. Please say exactly this: {timeout_msg}")]),
+                                turns=types.Content(role="user", parts=[types.Part(text=f"The child hasn't responded. Say exactly: {timeout_msg}")]),
                                 turn_complete=True
                             )
-                            # Wait a bit for the audio to be received/processed before exiting to idle fallback
                             await asyncio.sleep(5)
                             return
 
-                # Use wait instead of gather so we exit as soon as any task returns
                 done, pending = await asyncio.wait(
                     [
                         asyncio.create_task(forward_audio()), 
@@ -458,12 +503,7 @@ class VoiceAIServer:
                 )
                 for task in pending:
                     task.cancel()
-                
-                # Always return to IDLE after leaving the QA session tasks
-                logger.info("Exiting QA session block, ensuring IDLE state...")
                 await state["control_queue"].put("idle")
-        except asyncio.CancelledError:
-            logger.info("QA session task cancelled")
         except Exception as e:
             logger.error(f"QA session error: {e}")
             await state["control_queue"].put("idle")

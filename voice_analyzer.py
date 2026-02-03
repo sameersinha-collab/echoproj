@@ -16,7 +16,7 @@ from google import genai
 from google.genai import types
 
 # API Key - HARDCODED AS REQUESTED
-GEMINI_API_KEY = "AIzaSyDwSgMfmdfKIC8Rp8NZlsRKHulczWTCeto"
+GEMINI_API_KEY = ""
 
 # Models
 ANALYSIS_MODEL = "models/gemini-3-pro-preview" # Using 2.0 for robust file analysis
@@ -34,7 +34,7 @@ Return a JSON object with these exact keys:
 {
   "transcription": "The verbatim text spoken in the audio. Do not add any punctuation or words not present in the audio.",
   "gender": "The identified gender of the speaker (Male/Female).",
-  "system_prompt": "A detailed persona description to make a Gemini voice sound exactly like this sample (warmth, pace, accent, etc.).",
+  "system_prompt": "A detailed persona description to make a Gemini voice sound exactly like this sample (warmth, pace, accent, cadence, etc.). If you want to use any tool use the tools section to do so.",
   "best_voice": "Some people have told me to go with Sualafat but I want you to choose the single closest matching voice from this list keeping tone, pitch, etc in mind that matches the identified gender: [Achernar, Achird, Algenib, Algieba, Alnilam, Aoede, Autonoe, Callirrhoe, Charon, Despina, Enceladus, Erinome, Fenrir, Gacrux, Iapetus, Kore, Laomedeia, Leda, Orus, Pulcherrima, Puck, Rasalgethi, Sadachbia, Sadaltager, Schedar, Sulafat, Umbriel, Vindemiatrix, Zephyr, Zubenelgenubi]"
 }
 """
