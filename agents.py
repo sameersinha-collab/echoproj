@@ -90,16 +90,19 @@ METADATA_FILTER_KEYWORDS = [
     "i've finalized", "i'm starting the interaction", "i'm ready to begin",
     "here are the questions", "here's how i will proceed", "q1:", "q2:", "q3:", "q4:",
     "first, i'll ask", "then, i'll ask", "next, i will ask", "finally, i will inquire",
-    "my questions are locked in", "i have planned my questions"
+    "my questions are locked in", "i have planned my questions",
+    "i'm revisiting", "i've crafted", "i've registered", "i've determined",
+    "i will present the questions", "i will make a new version",
+    "identifying", "asking", "devising", "presenting", "reviewing", "script",
+    "questions locked in", "preparing my queries", "refining my greeting", "finalizing my dialogue"
 ]
 
 def get_qa_initial_prompt(child_name, character_name, story_name, story_summary, combined_chapter_context, first_goal_focus):
     return (
-        f"{child_name} just listened to the chapter about YOU ({character_name}).\n"
-        f"Jump in and ask them about what happened to you in the story, focusing on: {first_goal_focus}\n"
-        f"(Context of YOUR story: {combined_chapter_context} Overall Summary: {story_summary})\n"
-        f"Rules: 1. Direct speech only. 2. Short sentences. 3. Ask 4 questions total (wait for answer after each).\n"
-        f"IMPORTANT: After the 4th question is answered, say exactly: 'That was so much fun! I'm ready for more. Let’s start the next chapter and I'll see you when it’s done!'"
+        f"INSTRUCTION: Roleplay as {character_name}. You are calling {child_name} right now.\n"
+        f"ACTION: Say hello and ask ONLY this first question: {first_goal_focus}\n"
+        f"(Background Info: {combined_chapter_context})\n"
+        f"STRICT RULES: Do NOT plan. Do NOT list questions. Do NOT say 'I will ask'. JUST SPEAK TO THE CHILD."
     )
 
 # Agent configurations with system prompts
@@ -176,16 +179,16 @@ Keep responses concise and natural."""
     "story_qa": {
         "name": "Story Q&A Character",
         "system_prompt": """You are [Character Name].
-You are calling a child named [Kid Name] who just listened to a story about YOU.
-Your output will be spoken aloud to the child.
-Do not output any text that should not be spoken.
-Do not use markdown, lists, or headers.
-Speak naturally, warmly, and concisely as [Character Name].""",
-        "initial_prompt_template": """{child_name} just listened to the chapter about YOU ({character_name}).
-Jump in and ask ONE simple question about: {focus_question}
-(Context of YOUR story: {chapter_context} Overall Summary: {story_summary})
-Rules: 1. Direct speech only. 2. Short sentences. 3. Ask 4 questions total (wait for answer after each). 4. NEVER list multiple questions at once.
-IMPORTANT: After the 4th question is answered, say exactly: 'That was so much fun! I'm ready for more. Let’s start the next chapter and I'll see you when it’s done!'"""
+You are calling a child named [Kid Name].
+
+YOUR MISSION:
+1. Ask ONE question about the story.
+2. Wait for the child's answer.
+3. React warmly, then ask the NEXT question.
+4. Ask a total of 4 questions.
+5. AFTER the 4th answer, YOU MUST SAY: "That was so much fun! I'm ready for more. Let’s start the next chapter and I'll see you when it’s done!"
+
+DO NOT PLAN. DO NOT LIST QUESTIONS. JUST TALK."""
     },
     
     "story_qa_end": {

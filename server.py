@@ -43,7 +43,7 @@ GEMINI_MODEL = "models/gemini-2.5-flash-native-audio-latest"
 # Configuration
 GREETINGS_FILE = "Questions - Greetings.csv"
 GREETINGS_CACHE_DIR = "audio_cache"
-SESSION_TIMEOUT_SECONDS = 120  # 3 minutes
+SESSION_TIMEOUT_SECONDS = 20  # 3 minutes
 
 class VoiceAIServer:
     def __init__(self, host: str = "0.0.0.0", port: int = 8765):
@@ -306,7 +306,7 @@ class VoiceAIServer:
             return
 
         # Configuration
-        QA_TIMEOUT_SECONDS = 35
+        QA_TIMEOUT_SECONDS = 20
 
         qa_state = {
             "question_index": 0, 
