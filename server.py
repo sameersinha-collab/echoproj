@@ -162,6 +162,9 @@ class VoiceAIServer:
                 elif mode == "qa":
                     task = asyncio.create_task(self.run_qa_session(websocket, state))
                     state["active_tasks"].append(task)
+                elif mode == "intro":
+                    task = asyncio.create_task(self.run_intro_session(websocket, state))
+                    state["active_tasks"].append(task)
                 elif mode == "trigger":
                     task = asyncio.create_task(self.run_trigger_session(websocket, state))
                     state["active_tasks"].append(task)
@@ -506,6 +509,162 @@ class VoiceAIServer:
                 await state["control_queue"].put("idle")
         except Exception as e:
             logger.error(f"QA session error: {e}")
+            await state["control_queue"].put("idle")
+
+    async def run_intro_session(self, websocket, state):
+        params = state["params"]
+        story = get_story(params["story_id"])
+        
+        if not story:
+            await websocket.send(json.dumps({"type": "error", "message": "Story not found"}))
+            return
+
+        # Configuration
+        INTRO_TIMEOUT_SECONDS = 15
+
+        intro_state = {
+            "is_closing": False, 
+            "last_activity": time.time(),
+            "turn_count": 0,
+            "true_turn_count": 0
+        }
+
+        await websocket.send(json.dumps({
+            "type": "config",
+            "data": {
+                "mode": "intro",
+                "story_name": story.story_name,
+                "input_sample_rate": INPUT_SAMPLE_RATE,
+                "output_sample_rate": OUTPUT_SAMPLE_RATE
+            }
+        }))
+
+        agent = get_agent_config("story_intro")
+        character_name = getattr(story, 'character_name', "the story character")
+        
+        system_instruction = agent['system_prompt']
+        system_instruction = system_instruction.replace("[Character Name]", character_name)
+        system_instruction = system_instruction.replace("[Kid Name]", params['child_name'])
+        
+        config = types.LiveConnectConfig(
+            response_modalities=["AUDIO"],
+            system_instruction=types.Content(parts=[types.Part(text=system_instruction)])
+        )
+
+        try:
+            async with self.gemini_client.aio.live.connect(model=GEMINI_MODEL, config=config) as gemini_session:
+                logger.info("✅ Gemini Intro session established")
+
+                async def forward_audio():
+                    while True:
+                        try:
+                            audio_data = await state["audio_queue"].get()
+                            # if intro_state["is_closing"]:
+                            #    return
+                            await gemini_session.send_realtime_input(
+                                audio=types.Blob(data=audio_data, mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE}")
+                            )
+                        except Exception as e:
+                            logger.error(f"Error forwarding audio: {e}")
+                            break
+
+                async def receive_gemini():
+                    try:
+                        # Initial prompt
+                        initial_prompt = agent['initial_prompt_template']
+                        initial_prompt = initial_prompt.replace("[Character Name]", character_name)
+                        initial_prompt = initial_prompt.replace("[Kid Name]", params['child_name'])
+                        
+                        await gemini_session.send_client_content(
+                            turns=types.Content(role="user", parts=[types.Part(text=initial_prompt)]),
+                            turn_complete=True
+                        )
+                        
+                        while True:
+                            async for response in gemini_session.receive():
+                                if response.server_content:
+                                    turn = response.server_content.model_turn
+                                    if turn and turn.parts:
+                                        intro_state["last_activity"] = time.time()
+                                        intro_state["turn_count"] += 1
+                                        turn_text = ""
+                                        for part in turn.parts:
+                                            if hasattr(part, 'inline_data') and part.inline_data:
+                                                await websocket.send(part.inline_data.data)
+                                            if hasattr(part, 'text') and part.text:
+                                                content = part.text.strip()
+                                                turn_text += " " + content
+                                                logger.info(f"RECEIVED TEXT: '{content}'")
+                                                # Reuse existing metadata filter
+                                                content_lower = content.lower()
+                                                metadata_keywords = METADATA_FILTER_KEYWORDS
+                                                
+                                                if content.startswith("**") or content.startswith("(") or any(x in content_lower for x in metadata_keywords):
+                                                    logger.info(f"FILTERED METADATA: '{content[:100]}...'")
+                                                    continue
+                                                
+                                                await websocket.send(json.dumps({"type": "transcript", "text": content}))
+                                        
+                                        if turn_text.strip():
+                                            full_text = turn_text.strip()
+                                            
+                                            # Check keywords for closing
+                                            closing_keywords = [
+                                                "adventure awaits", "let's get this story started", 
+                                                "here we go", "can't wait for you to hear", 
+                                                "what happens next"
+                                            ]
+                                            # Skip detection on the very first greeting (Turn 1) to avoid false positives
+                                            # The greeting is fixed and doesn't contain these phrases, but safety first.
+                                            # We use a simple counter that increments on turn_complete to track true turns.
+                                            if intro_state["true_turn_count"] > 0 and any(phrase in full_text.lower() for phrase in closing_keywords):
+                                                logger.info(f"✅ Keyword match detected for intro closing. Setting is_closing=True")
+                                                intro_state["is_closing"] = True
+
+                                    if response.server_content.turn_complete:
+                                        intro_state["true_turn_count"] += 1
+                                        if intro_state["is_closing"]:
+                                            logger.info("🏁 Intro session closing detected. Sending intro_complete.")
+                                            await websocket.send(json.dumps({"type": "intro_complete"}))
+                                            # Wait a bit for audio to play out on client before cutting connection/mode
+                                            await asyncio.sleep(0.5) 
+                                            return
+
+                                        await websocket.send(json.dumps({"type": "turn_complete"}))
+                                            
+                            await asyncio.sleep(0.01)
+                    except Exception as e:
+                        logger.error(f"Error in receive_gemini: {e}")
+
+                async def check_intro_timeout():
+                    while True:
+                        await asyncio.sleep(2)
+                        elapsed = time.time() - intro_state["last_activity"]
+                        if elapsed > INTRO_TIMEOUT_SECONDS and not intro_state["is_closing"]:
+                            timeout_msg = "Alright, adventure awaits! Let's get this story started!"
+                            # Force model to say the timeout message
+                            await gemini_session.send_client_content(
+                                turns=types.Content(role="user", parts=[types.Part(text=f"The child didn't respond. Say exactly: {timeout_msg}")]),
+                                turn_complete=True
+                            )
+                            # We don't return immediately; we let receive_gemini handle the output and closing detection
+                            # But we might want to force close after a short delay to ensure it doesn't hang
+                            await asyncio.sleep(5)
+                            return
+
+                done, pending = await asyncio.wait(
+                    [
+                        asyncio.create_task(forward_audio()), 
+                        asyncio.create_task(receive_gemini()), 
+                        asyncio.create_task(check_intro_timeout())
+                    ],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in pending:
+                    task.cancel()
+                await state["control_queue"].put("idle")
+        except Exception as e:
+            logger.error(f"Intro session error: {e}")
             await state["control_queue"].put("idle")
 
     async def run_trigger_session(self, websocket, state):
