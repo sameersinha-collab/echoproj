@@ -58,8 +58,8 @@ VOICE_PROFILES = {
     "sulafat": {
         "voice_name": "Sulafat",
         "language_code": "en-US",
-        "description": "Graceful, kind, and slightly magical American female voice, perfect for a fairy tale princess like Cinderella.",
-        "tone_instruction": "You MUST maintain a graceful, kind, and slightly magical tone. Speak like a gentle princess with a clear, neutral American accent."
+        "description": "Cinderella (The Resilient Observer). Soft-spoken but firm, blending gentle melodic warmth with resilience. Clear, thoughtful, deliberate pace. Grounded, breathy tone that gains strength. For kids 3-10 years.",
+        "tone_instruction": "Speak in a soft-spoken but firm voice, blending gentle melodic warmth with resilience. Avoid being mousey; use a grounded, breathy tone that is rhythmic and sincere. Speak deliberately and thoughtfully, as if observing the world. Aim for genuine connection. The audience is kids 3-10 years old."
     }
 }
 
