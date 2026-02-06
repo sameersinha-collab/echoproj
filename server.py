@@ -114,7 +114,7 @@ class VoiceAIServer:
             "agent_name": DEFAULT_AGENT,
             "voice_profile": DEFAULT_VOICE_PROFILE,
             "mode": "idle",
-            "child_name": "friend",
+            "child_name": "Kiaan",
             "story_id": "cinderella",
             "chapter_id": "1",
             "trigger": "",
@@ -963,7 +963,8 @@ class VoiceAIServer:
                                             closing_keywords = [
                                                 "talk to you later", "see ya", "everyone needs a break sometimes",
                                                 "insert my card", "bye", "insert her card", "put my card", "see you again",
-                                                "listen to my story again", "ask your parents"
+                                                "listen to my story again", "ask your parents",
+                                                "press the right button", "insert your story card"
                                             ]
                                             
                                             if stopped_state["true_turn_count"] > 0 and any(phrase in full_text.lower() for phrase in closing_keywords):

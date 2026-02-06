@@ -19,7 +19,7 @@ CHANNELS, WIDTH = 1, 2
 IN_CHUNK, OUT_CHUNK = 1600, 2400
 
 class PersistentClient:
-    def __init__(self, url, child_name="Kian"):
+    def __init__(self, url, child_name="Kiaan"):
         self.url = url
         self.child_name = child_name
         self.audio = pyaudio.PyAudio()
