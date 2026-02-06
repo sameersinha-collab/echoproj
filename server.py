@@ -852,9 +852,15 @@ class VoiceAIServer:
             await websocket.send(json.dumps({"type": "error", "message": "Story/Chapter not found"}))
             return
 
+        # Check if is_last_chapter is in params (from client), otherwise fallback to story logic
+        if "is_last_chapter" in params:
+             is_last = params["is_last_chapter"]
+        else:
+             is_last = story.is_last_chapter(params["chapter_id"])
+
         # Configuration
-        TIMEOUT_PROMPT_SECONDS = 20
-        TIMEOUT_TERMINATE_SECONDS = 50 # 20 + 30
+        TIMEOUT_PROMPT_SECONDS = 10
+        TIMEOUT_TERMINATE_SECONDS = 30 # 10 + 20
 
         stopped_state = {
             "is_closing": False, 
@@ -874,12 +880,6 @@ class VoiceAIServer:
             }
         }))
         
-        # Check if is_last_chapter is in params (from client), otherwise fallback to story logic
-        if "is_last_chapter" in params:
-             is_last = params["is_last_chapter"]
-        else:
-             is_last = story.is_last_chapter(params["chapter_id"])
-
         if is_last:
             agent = get_agent_config("story_stopped_finished")
             character_name = "Wippi" # Wippi voice for finished
@@ -962,7 +962,8 @@ class VoiceAIServer:
                                             # Check keywords for closing
                                             closing_keywords = [
                                                 "talk to you later", "see ya", "everyone needs a break sometimes",
-                                                "insert my card", "bye"
+                                                "insert my card", "bye", "insert her card", "put my card", "see you again",
+                                                "listen to my story again", "ask your parents"
                                             ]
                                             
                                             if stopped_state["true_turn_count"] > 0 and any(phrase in full_text.lower() for phrase in closing_keywords):
