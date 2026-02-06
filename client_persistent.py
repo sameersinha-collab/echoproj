@@ -83,7 +83,7 @@ class PersistentClient:
                 # Background task to listen for user keyboard input to switch modes
                 async def input_loop():
                     while self.is_active:
-                        print("\nOptions: [1] Chat [2] Q&A (Cinderella Ch1) [3] Trigger (Morning Wake Up) [4] Intro (Cinderella Card) [q] Quit")
+                        print("\nOptions: [1] Chat [2] Q&A (Cinderella Ch1) [3] Trigger (Morning Wake Up) [4] Intro (Cinderella Card) [5] Stopped (Cinderella Ch1) [6] Stopped (Last Chapter) [q] Quit")
                         choice = await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
                         choice = choice.strip()
                         if choice == '1':
@@ -94,6 +94,10 @@ class PersistentClient:
                             await self.send_command({"command": "trigger", "trigger": "Morning Wake Up"})
                         elif choice == '4':
                             await self.send_command({"command": "switch_mode", "mode": "intro", "story_id": "cinderella"})
+                        elif choice == '5':
+                            await self.send_command({"command": "switch_mode", "mode": "stopped", "story_id": "cinderella", "chapter_id": "1", "is_last_chapter": False})
+                        elif choice == '6':
+                            await self.send_command({"command": "switch_mode", "mode": "stopped", "story_id": "cinderella", "chapter_id": "3", "is_last_chapter": True})
                         elif choice == 'q':
                             self.is_active = False
                             break
@@ -125,6 +129,8 @@ class PersistentClient:
                             print(f"\n🏆 Q&A Done! Score: {data.get('score')}")
                         elif m_type == "intro_complete":
                             print(f"\n🎬 Intro Done! Starting Story...")
+                        elif m_type == "stopped_complete":
+                            print(f"\n🛑 Story Stopped Session Done! Returning to Idle...")
                         elif m_type == "error":
                             print(f"❌ Server Error: {data.get('message')}")
                 
@@ -136,6 +142,6 @@ class PersistentClient:
             self.audio.terminate()
 
 if __name__ == "__main__":
-    client = PersistentClient("wss://voice-ai-pers-qa-388996421538.asia-south1.run.app")
+    client = PersistentClient("ws://localhost:8765")
     asyncio.run(client.connect())
 

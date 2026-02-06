@@ -117,13 +117,18 @@ class VoiceAIServer:
             "child_name": "friend",
             "story_id": "cinderella",
             "chapter_id": "1",
-            "trigger": ""
+            "trigger": "",
+            "is_last_chapter": False
         }
         if path and "?" in path:
             parsed = parse_qs(urlparse(path).query)
             for k in params:
                 if k in parsed:
-                    params[k] = parsed[k][0]
+                    val = parsed[k][0]
+                    if k == "is_last_chapter":
+                        params[k] = val.lower() == 'true'
+                    else:
+                        params[k] = val
         return params
 
     async def handle_client(self, websocket, path=None):
@@ -164,6 +169,9 @@ class VoiceAIServer:
                     state["active_tasks"].append(task)
                 elif mode == "intro":
                     task = asyncio.create_task(self.run_intro_session(websocket, state))
+                    state["active_tasks"].append(task)
+                elif mode == "stopped":
+                    task = asyncio.create_task(self.run_stopped_session(websocket, state))
                     state["active_tasks"].append(task)
                 elif mode == "trigger":
                     task = asyncio.create_task(self.run_trigger_session(websocket, state))
@@ -545,6 +553,7 @@ class VoiceAIServer:
         system_instruction = agent['system_prompt']
         system_instruction = system_instruction.replace("[Character Name]", character_name)
         system_instruction = system_instruction.replace("[Kid Name]", params['child_name'])
+        system_instruction = system_instruction.replace("[Story Summary]", story.story_summary)
         
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
@@ -665,6 +674,188 @@ class VoiceAIServer:
                 await state["control_queue"].put("idle")
         except Exception as e:
             logger.error(f"Intro session error: {e}")
+            await state["control_queue"].put("idle")
+
+    async def run_stopped_session(self, websocket, state):
+        params = state["params"]
+        story = get_story(params["story_id"])
+        chapter = story.get_chapter(params["chapter_id"]) if story else None
+        
+        if not story or not chapter:
+            await websocket.send(json.dumps({"type": "error", "message": "Story/Chapter not found"}))
+            return
+
+        # Configuration
+        TIMEOUT_PROMPT_SECONDS = 20
+        TIMEOUT_TERMINATE_SECONDS = 50 # 20 + 30
+
+        stopped_state = {
+            "is_closing": False, 
+            "last_activity": time.time(),
+            "turn_count": 0,
+            "true_turn_count": 0,
+            "timeout_prompt_sent": False
+        }
+
+        await websocket.send(json.dumps({
+            "type": "config",
+            "data": {
+                "mode": "stopped",
+                "story_name": story.story_name,
+                "input_sample_rate": INPUT_SAMPLE_RATE,
+                "output_sample_rate": OUTPUT_SAMPLE_RATE
+            }
+        }))
+        
+        # Check if is_last_chapter is in params (from client), otherwise fallback to story logic
+        if "is_last_chapter" in params:
+             is_last = params["is_last_chapter"]
+        else:
+             is_last = story.is_last_chapter(params["chapter_id"])
+
+        if is_last:
+            agent = get_agent_config("story_stopped_finished")
+            character_name = "Wippi" # Wippi voice for finished
+            # Use default voice profile for Wippi (usually Indian Female) if not specified differently, 
+            # or we can force it. The prompt says "Voice: Wippi (General AI Voice)". 
+            # We'll assume the client/story params might override, but for Wippi we should probably force default or specific wippi voice.
+            # Let's stick to the params['voice_profile'] but ideally it should be Wippi's voice.
+            # If the story has a character voice mapped, we might need to override it back to Wippi.
+            # For now, I will not force the voice profile change here to keep it simple, 
+            # unless "Wippi" voice profile exists. It uses 'indian_female' by default.
+        else:
+            agent = get_agent_config("story_stopped_mid")
+            character_name = getattr(story, 'character_name', "the story character")
+        
+        system_instruction = agent['system_prompt']
+        system_instruction = system_instruction.replace("[Character Name]", character_name)
+        system_instruction = system_instruction.replace("[Kid Name]", params['child_name'])
+        system_instruction = system_instruction.replace("[Chapter Name]", chapter.chapter_name)
+        system_instruction = system_instruction.replace("[Chapter Summary]", chapter.summary if chapter.summary else "")
+        system_instruction = system_instruction.replace("[Story Name]", story.story_name) # For finished agent
+        
+        config = types.LiveConnectConfig(
+            response_modalities=["AUDIO"],
+            system_instruction=types.Content(parts=[types.Part(text=system_instruction)])
+        )
+
+        try:
+            async with self.gemini_client.aio.live.connect(model=GEMINI_MODEL, config=config) as gemini_session:
+                logger.info("✅ Gemini Stopped session established")
+
+                async def forward_audio():
+                    while True:
+                        try:
+                            audio_data = await state["audio_queue"].get()
+                            await gemini_session.send_realtime_input(
+                                audio=types.Blob(data=audio_data, mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE}")
+                            )
+                        except Exception as e:
+                            logger.error(f"Error forwarding audio: {e}")
+                            break
+
+                async def receive_gemini():
+                    try:
+                        # Initial prompt
+                        initial_prompt = agent['initial_prompt_template']
+                        
+                        await gemini_session.send_client_content(
+                            turns=types.Content(role="user", parts=[types.Part(text=initial_prompt)]),
+                            turn_complete=True
+                        )
+                        
+                        while True:
+                            async for response in gemini_session.receive():
+                                if response.server_content:
+                                    turn = response.server_content.model_turn
+                                    if turn and turn.parts:
+                                        stopped_state["last_activity"] = time.time()
+                                        stopped_state["turn_count"] += 1
+                                        turn_text = ""
+                                        for part in turn.parts:
+                                            if hasattr(part, 'inline_data') and part.inline_data:
+                                                await websocket.send(part.inline_data.data)
+                                            if hasattr(part, 'text') and part.text:
+                                                content = part.text.strip()
+                                                turn_text += " " + content
+                                                logger.info(f"RECEIVED TEXT: '{content}'")
+                                                # Reuse existing metadata filter
+                                                content_lower = content.lower()
+                                                metadata_keywords = METADATA_FILTER_KEYWORDS
+                                                
+                                                if content.startswith("**") or content.startswith("(") or any(x in content_lower for x in metadata_keywords):
+                                                    logger.info(f"FILTERED METADATA: '{content[:100]}...'")
+                                                    continue
+                                                
+                                                await websocket.send(json.dumps({"type": "transcript", "text": content}))
+                                        
+                                        if turn_text.strip():
+                                            full_text = turn_text.strip()
+                                            
+                                            # Check keywords for closing
+                                            closing_keywords = [
+                                                "talk to you later", "see ya", "everyone needs a break sometimes",
+                                                "insert my card", "bye"
+                                            ]
+                                            
+                                            if stopped_state["true_turn_count"] > 0 and any(phrase in full_text.lower() for phrase in closing_keywords):
+                                                logger.info(f"✅ Keyword match detected for stopped closing. Setting is_closing=True")
+                                                stopped_state["is_closing"] = True
+
+                                    if response.server_content.turn_complete:
+                                        stopped_state["true_turn_count"] += 1
+                                        if stopped_state["is_closing"]:
+                                            logger.info("🏁 Stopped session closing detected. Sending stopped_complete.")
+                                            await websocket.send(json.dumps({"type": "stopped_complete"}))
+                                            # Wait a bit for audio to play out on client before cutting connection/mode
+                                            await asyncio.sleep(0.5) 
+                                            return
+
+                                        await websocket.send(json.dumps({"type": "turn_complete"}))
+                                            
+                            await asyncio.sleep(0.01)
+                    except Exception as e:
+                        logger.error(f"Error in receive_gemini: {e}")
+
+                async def check_stopped_timeout():
+                    while True:
+                        await asyncio.sleep(2)
+                        elapsed = time.time() - stopped_state["last_activity"]
+                        
+                        if elapsed > TIMEOUT_TERMINATE_SECONDS and not stopped_state["is_closing"]:
+                            logger.info("Stopped session termination timeout reached.")
+                            timeout_msg = "I'll let you get to your other toys now. Talk to you later!"
+                            await gemini_session.send_client_content(
+                                turns=types.Content(role="user", parts=[types.Part(text=f"The child didn't respond for a long time. Say exactly: {timeout_msg}")]),
+                                turn_complete=True
+                            )
+                            await asyncio.sleep(5)
+                            stopped_state["is_closing"] = True # Trigger close
+                            return
+
+                        elif elapsed > TIMEOUT_PROMPT_SECONDS and not stopped_state["timeout_prompt_sent"] and not stopped_state["is_closing"]:
+                            logger.info("Stopped session prompt timeout reached.")
+                            # Send a prompt to nudge the user
+                            await gemini_session.send_client_content(
+                                turns=types.Content(role="user", parts=[types.Part(text="The child hasn't responded. Gently prompt them once to see if they are still there. Keep it short.")]),
+                                turn_complete=True
+                            )
+                            stopped_state["timeout_prompt_sent"] = True
+                            # We don't return, we keep waiting for termination timeout or user input
+
+                done, pending = await asyncio.wait(
+                    [
+                        asyncio.create_task(forward_audio()), 
+                        asyncio.create_task(receive_gemini()), 
+                        asyncio.create_task(check_stopped_timeout())
+                    ],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in pending:
+                    task.cancel()
+                await state["control_queue"].put("idle")
+        except Exception as e:
+            logger.error(f"Stopped session error: {e}")
             await state["control_queue"].put("idle")
 
     async def run_trigger_session(self, websocket, state):
